@@ -1,0 +1,1053 @@
+import { doc, getDoc, setDoc } from 'firebase/firestore/lite';
+import {
+  dbLite as db,
+  isFirebaseConfigured,
+  isFirestoreQuotaExceeded,
+  isQuotaExceededError,
+  setFirestoreQuotaExceeded,
+  MASTER_USER_ID,
+  MASTER_USER_PIN,
+  getOfficeScopedStorageKey,
+  getOfficeFirestoreDocPrefix,
+} from '../firebase';
+import { fetchUserProfilesFromFirebase, pushUserProfilesToFirebase } from '../services/firebaseFirestoreService';
+import { localDb } from '../services/localDatabase';
+import { logUserLogin, updatePresence } from '../services/presenceService';
+import { Airman, DetailedUserLogin, UserLoginRole, UserLoginStatus } from '../types';
+
+export interface UserLoginLog {
+  id: string;
+  bdNo: string;
+  rank: string;
+  name: string;
+  flightName: string;
+  timestamp: string;
+  timeFormatted: string;
+  role?: string;
+  deviceInfo: string;
+}
+
+export interface UserSession {
+  userId?: string;
+  airmanId: string;
+  bdNo: string;
+  rank: string;
+  name: string;
+  flightName?: string;
+  trade?: string;
+  loginTimestamp: string;
+  assignedRole?: string;
+  systemRole?: string;
+  adminPass?: string;
+  ownerPass?: string;
+  isProtected?: boolean;
+}
+
+const SESSION_KEY = 'baf_user_session';
+const HISTORY_KEY = 'baf_user_login_history';
+const DETAILED_USERS_KEY = 'baf_detailed_user_logins';
+
+export function getDetailedUsersStorageKey(): string {
+  return getOfficeScopedStorageKey(DETAILED_USERS_KEY);
+}
+
+export function getLoginHistoryStorageKey(): string {
+  return getOfficeScopedStorageKey(HISTORY_KEY);
+}
+
+export const MASTER_OWNER_USER_ID = MASTER_USER_ID;
+
+export function isMasterProtectedUser(
+  idOrBd?: string | null,
+  role?: string | null,
+  isProtected?: boolean
+): boolean {
+  if (isProtected === true) return true;
+  if (role === 'master_owner') return true;
+  if (!idOrBd) return false;
+  const clean = String(idOrBd).replace(/^BD\/?/i, '').replace(/\s+/g, '').trim().toLowerCase();
+  const digits = clean.replace(/\D/g, '');
+  return clean === '48456' || digits === '48456' || clean === 'user-login-48456' || clean === 'airman-48456';
+}
+
+export function isMasterPinMatch(providedPin: string, storedPin?: string): boolean {
+  const cleanProvided = String(providedPin || '').trim();
+  if (!cleanProvided) return false;
+  if (cleanProvided === MASTER_USER_PIN) return true;
+  if (storedPin && cleanProvided === String(storedPin).trim()) return true;
+  // Also allow '48456' or '1124' when MASTER_USER_PIN is still set to the default placeholder
+  if (MASTER_USER_PIN === 'YOUR_MASTER_PIN' && (cleanProvided === '48456' || cleanProvided === '1124')) {
+    return true;
+  }
+  return false;
+}
+
+export function buildMasterOwnerUserRecord(): DetailedUserLogin {
+  const nowIso = new Date().toISOString();
+  return {
+    id: 'user-login-48456',
+    userId: MASTER_USER_ID,
+    airmanId: 'airman-48456',
+    bdNo: MASTER_USER_ID,
+    rank: 'Master',
+    name: 'System Master Owner',
+    flightName: 'Admin',
+    trade: 'System Control',
+    role: 'master_owner',
+    pin: MASTER_USER_PIN,
+    password: MASTER_USER_PIN,
+    adminPass: '1124',
+    ownerPass: '1124',
+    isProtected: true,
+    status: 'ACTIVE',
+    detailOrder: 'MASTER-OWNER-PROTECTED',
+    detailedAt: nowIso,
+    detailedBy: 'System Auto-Provision',
+    remarks: 'Protected System Master Owner Account',
+    updatedAt: nowIso,
+  };
+}
+
+// In-memory cache of login history
+let cachedLoginHistory: UserLoginLog[] = [];
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('baf_office_config_changed', () => {
+    cachedLoginHistory = [];
+  });
+}
+
+/**
+ * Format timestamp nicely
+ */
+export const formatLogTime = (isoString: string): string => {
+  try {
+    const d = new Date(isoString);
+    return d.toLocaleString('en-GB', {
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    });
+  } catch {
+    return isoString;
+  }
+};
+
+/**
+ * Get current active user session (Client device local session)
+ */
+export const getCurrentUserSession = (): UserSession | null => {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const session = JSON.parse(raw) as UserSession;
+    const cleanBd = (session.bdNo || session.userId || '').replace(/^BD\/?/i, '').trim();
+    if (cleanBd === '48456' || session.systemRole === 'master_owner') {
+      if (session.assignedRole !== 'OWNER' && session.assignedRole !== 'master_owner') {
+        session.assignedRole = 'OWNER';
+      }
+      session.systemRole = 'master_owner';
+      session.isProtected = true;
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    }
+    return session;
+  } catch {
+    return null;
+  }
+};
+
+export const getDetailedUsers = (nominalAirmen: Airman[] = []): DetailedUserLogin[] => {
+  let parsed: DetailedUserLogin[] = [];
+  const storageKey = getDetailedUsersStorageKey();
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (Array.isArray(p) && p.length > 0) {
+        parsed = p.map((u) => ({
+          ...u,
+          status:
+            u.status === 'SUSPENDED' &&
+            nominalAirmen.find(
+              (a) => (a.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase() === (u.bdNo || '').toLowerCase()
+            )?.active !== false
+              ? 'ACTIVE'
+              : u.status,
+        }));
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to parse detailed user logins:', e);
+  }
+
+  let modified = false;
+
+  // Remove legacy obsolete accounts
+  const beforeCount = parsed.length;
+  parsed = parsed.filter((u) => u.bdNo !== '53539919' && u.bdNo !== 'deleted_admin');
+  if (parsed.length !== beforeCount) {
+    modified = true;
+  }
+
+  // Enforce protected Master Owner 48456 record
+  const masterRecord = buildMasterOwnerUserRecord();
+  const ownerIdx = parsed.findIndex(
+    (u) => (u.userId || u.bdNo || '').replace(/^BD\/?/i, '').trim() === MASTER_USER_ID
+  );
+  if (ownerIdx >= 0) {
+    const curr = parsed[ownerIdx];
+    if (
+      curr.role !== 'master_owner' ||
+      curr.name !== 'System Master Owner' ||
+      curr.isProtected !== true ||
+      curr.userId !== MASTER_USER_ID
+    ) {
+      parsed[ownerIdx] = {
+        ...curr,
+        ...masterRecord,
+        pin: curr.pin && curr.pin !== '48456' ? curr.pin : MASTER_USER_PIN,
+        password: curr.password && curr.password !== '48456' ? curr.password : MASTER_USER_PIN,
+      };
+      modified = true;
+    }
+  } else {
+    parsed.push(masterRecord);
+    modified = true;
+  }
+
+  // Auto-sync Nominal Roll users into User Management (excluding 48456 so 48456 stays hidden from manpower)
+  if (nominalAirmen && nominalAirmen.length > 0) {
+    nominalAirmen.forEach((a) => {
+      const cleanBd = (a.bdNo || '').replace(/^BD\/?/i, '').trim();
+      if (!cleanBd || isMasterProtectedUser(cleanBd, a.role, a.isProtected)) return;
+
+      const idx = parsed.findIndex((u) => (u.bdNo || '').toLowerCase() === cleanBd.toLowerCase());
+      if (idx === -1) {
+        parsed.push({
+          id: `user-login-${cleanBd}`,
+          userId: cleanBd,
+          airmanId: a.id,
+          bdNo: cleanBd,
+          rank: a.rank,
+          name: a.name,
+          mobileNo: a.mobileNo,
+          flightName: a.flightName,
+          trade: a.trade,
+          role: 'USER',
+          pin: cleanBd,
+          password: cleanBd,
+          adminPass: '',
+          status: a.active === false ? 'SUSPENDED' : 'ACTIVE',
+          detailOrder: 'DO-OFFICE/GEN/2026',
+          detailedAt: new Date().toISOString(),
+          detailedBy: 'System Auto Sync',
+          remarks: 'Auto-synced from Nominal Roll',
+        });
+        modified = true;
+      } else {
+        let detailModified = false;
+        if (!a.active && parsed[idx].status === 'ACTIVE') {
+          parsed[idx].status = 'SUSPENDED';
+          detailModified = true;
+        } else if (a.active && parsed[idx].status === 'SUSPENDED') {
+          parsed[idx].status = 'ACTIVE';
+          detailModified = true;
+        }
+        if (detailModified) modified = true;
+      }
+    });
+  }
+
+  if (modified) {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(parsed));
+    } catch {}
+  }
+
+  return parsed.length > 0 ? parsed : [masterRecord];
+};
+
+export async function provisionMasterOwnerInOffice(nominalAirmen: Airman[] = []): Promise<DetailedUserLogin> {
+  const masterUser = buildMasterOwnerUserRecord();
+  const users = getDetailedUsers(nominalAirmen);
+  const idx = users.findIndex(
+    (u) => (u.userId || u.bdNo || '').replace(/^BD\/?/i, '').trim() === MASTER_USER_ID
+  );
+  if (idx >= 0) {
+    users[idx] = { ...users[idx], ...masterUser };
+  } else {
+    users.unshift(masterUser);
+  }
+  saveDetailedUsers(users, true);
+  try {
+    await pushUserProfilesToFirebase([masterUser]);
+  } catch {
+    // Saved in local queue if offline
+  }
+  return masterUser;
+}
+
+export function loginAsMasterOwnerSession(): UserSession {
+  const masterUser = buildMasterOwnerUserRecord();
+  const masterAirman: Airman = {
+    id: 'airman-48456',
+    serNo: 0,
+    code: 'MST-OWN',
+    bdNo: MASTER_USER_ID,
+    rank: 'MWO',
+    name: 'System Master Owner',
+    fullName: 'System Master Owner',
+    trade: 'Master Control',
+    addressBlock: 'HQ',
+    mobileNo: '',
+    flightName: 'Admin',
+    remarks: 'Protected Master Owner',
+    active: false,
+    isProtected: true,
+    role: 'master_owner',
+  };
+  sessionStorage.setItem('baf_user_role', 'OWNER');
+  return setUserSession(masterAirman, 'OWNER', masterUser);
+}
+
+/**
+ * Save detailed user logins
+ */
+export const saveDetailedUsers = (users: DetailedUserLogin[], syncToCloud: boolean = true): void => {
+  try {
+    const storageKey = getDetailedUsersStorageKey();
+    localStorage.setItem(storageKey, JSON.stringify(users));
+    window.dispatchEvent(new CustomEvent('baf_detailed_users_changed', { detail: users }));
+
+    if (syncToCloud) {
+      (localDb as any).db.detailedUsers = users;
+      localDb.forceSave();
+    }
+  } catch (e) {
+    console.error('Failed to save detailed user logins:', e);
+  }
+};
+
+/**
+ * Detail an individual airman for user login
+ */
+export const detailAirmanForLogin = (
+  airman: Airman,
+  role: UserLoginRole = 'USER',
+  status: UserLoginStatus = 'ACTIVE',
+  detailOrder: string = '',
+  remarks: string = ''
+): DetailedUserLogin => {
+  const current = getDetailedUsers();
+  const cleanBd = (airman.bdNo || "").replace(/^BD\/?/i, '').trim();
+
+  const existingIndex = current.findIndex(
+    (u) => u.bdNo.toLowerCase() === cleanBd.toLowerCase() || (u.airmanId && u.airmanId === airman.id)
+  );
+
+  const newEntry: DetailedUserLogin = {
+    id: existingIndex >= 0 ? current[existingIndex].id : `user-login-${cleanBd}-${Date.now()}`,
+    airmanId: airman.id,
+    bdNo: cleanBd,
+    rank: airman.rank,
+    name: airman.name,
+    flightName: airman.flightName,
+    trade: airman.trade,
+    role,
+    status,
+    detailOrder: detailOrder.trim() || `DO-155/DTL/${cleanBd}`,
+    detailedAt: new Date().toISOString(),
+    detailedBy: '155 UASU Admin',
+    remarks: remarks.trim() || `Detailed from Nominal Roll (${airman.rank} ${airman.name})`,
+    lastLoginAt: existingIndex >= 0 ? current[existingIndex].lastLoginAt : undefined,
+  };
+
+  if (existingIndex >= 0) {
+    current[existingIndex] = newEntry;
+  } else {
+    current.unshift(newEntry);
+  }
+
+  saveDetailedUsers(current);
+  return newEntry;
+};
+
+/**
+ * Batch detail all airmen from nominal roll
+ */
+export const batchDetailAllAirmen = (airmen: Airman[]): DetailedUserLogin[] => {
+  const current = getDetailedUsers();
+  const updatedList: DetailedUserLogin[] = [...current];
+
+  airmen.forEach((airman) => {
+    const cleanBd = (airman.bdNo || "").replace(/^BD\/?/i, '').trim();
+    const idx = updatedList.findIndex((u) => u.bdNo.toLowerCase() === cleanBd.toLowerCase());
+    const isPrimary = cleanBd === '48456';
+
+    const entry: DetailedUserLogin = {
+      id: idx >= 0 ? updatedList[idx].id : `user-login-${cleanBd}`,
+      airmanId: airman.id,
+      bdNo: cleanBd,
+      rank: airman.rank,
+      name: airman.name,
+      flightName: airman.flightName,
+      trade: airman.trade,
+      role: idx >= 0 ? updatedList[idx].role : (isPrimary ? 'OWNER' : 'USER'),
+      password: idx >= 0 && updatedList[idx].password ? updatedList[idx].password : cleanBd,
+      status: idx >= 0 ? updatedList[idx].status : 'ACTIVE',
+      detailOrder: idx >= 0 && updatedList[idx].detailOrder ? updatedList[idx].detailOrder : `DO-155/NR/${cleanBd}`,
+      detailedAt: idx >= 0 ? updatedList[idx].detailedAt : new Date().toISOString(),
+      detailedBy: '155 UASU HQ Batch Detail',
+      remarks: idx >= 0 && updatedList[idx].remarks ? updatedList[idx].remarks : `Detailed from Nominal Roll (${airman.flightName} Flight)`,
+      lastLoginAt: idx >= 0 ? updatedList[idx].lastLoginAt : undefined,
+    };
+
+    if (idx >= 0) {
+      updatedList[idx] = entry;
+    } else {
+      updatedList.push(entry);
+    }
+  });
+
+  saveDetailedUsers(updatedList);
+  return updatedList;
+};
+
+/**
+ * Remove or Revoke login access for a BD number
+ */
+export const removeDetailedUser = (bdNo: string): void => {
+  const clean = (bdNo || "").replace(/^BD\/?/i, '').trim().toLowerCase();
+  if (isMasterProtectedUser(clean)) return; // Prevent deleting 48456
+  const current = getDetailedUsers();
+  const filtered = current.filter((u) => !isMasterProtectedUser(u.bdNo, u.role, u.isProtected) ? u.bdNo.toLowerCase() !== clean : true);
+  saveDetailedUsers(filtered);
+};
+
+/**
+ * Toggle active / suspended / disabled status
+ */
+export const toggleUserLoginStatus = (bdNo: string, newStatus: UserLoginStatus): DetailedUserLogin | null => {
+  const clean = (bdNo || "").replace(/^BD\/?/i, '').trim().toLowerCase();
+  if (isMasterProtectedUser(clean)) return null; // Prevent suspending/disabling 48456
+  const current = getDetailedUsers();
+  const idx = current.findIndex((u) => u.bdNo.toLowerCase() === clean);
+  if (idx === -1) return null;
+
+  current[idx].status = newStatus;
+  saveDetailedUsers(current);
+  return current[idx];
+};
+
+/**
+ * Validate User Login Attempt
+ */
+export const validateUserLogin = async (
+  bdInput: string,
+  passwordInput: string,
+  nominalAirmen: Airman[]
+): Promise<{ success: boolean; airman?: Airman; detailedUser?: DetailedUserLogin; message: string }> => {
+  const cleanInput = (bdInput || "").trim().replace(/^BD\/?/i, '').replace(/\s+/g, '').toLowerCase();
+  const cleanDigits = cleanInput.replace(/\D/g, '');
+
+  if (!cleanInput && !cleanDigits) {
+    return { success: false, message: 'Please enter your User ID.' };
+  }
+
+  // Special Master Owner (48456) Login Check
+  if (cleanInput === '48456' || cleanDigits === '48456') {
+    const rawProvided = (passwordInput || '').trim();
+    if (!rawProvided) {
+      return { success: false, message: 'Please enter your PIN.' };
+    }
+    const detailedList = getDetailedUsers(nominalAirmen);
+    const existingMaster = detailedList.find((u) => isMasterProtectedUser(u.userId || u.bdNo, u.role, u.isProtected));
+    const storedPin = existingMaster?.pin || existingMaster?.password;
+
+    if (isMasterPinMatch(rawProvided, storedPin)) {
+      const masterDetail = buildMasterOwnerUserRecord();
+      const masterAirman: Airman = {
+        id: 'airman-48456',
+        serNo: 0,
+        code: 'MST-OWN',
+        bdNo: MASTER_USER_ID,
+        rank: 'MWO',
+        name: 'System Master Owner',
+        fullName: 'System Master Owner',
+        trade: 'System Control',
+        addressBlock: 'HQ',
+        mobileNo: '',
+        flightName: 'Admin',
+        remarks: 'Protected Master Owner',
+        active: false,
+        isProtected: true,
+        role: 'master_owner',
+      };
+      return {
+        success: true,
+        airman: masterAirman,
+        detailedUser: masterDetail,
+        message: 'Access granted for System Master Owner',
+      };
+    } else {
+      return {
+        success: false,
+        message: 'Invalid Master Owner PIN.',
+      };
+    }
+  }
+
+  // 1. Instant Local Verification (Zero latency check)
+  const detailedList = getDetailedUsers(nominalAirmen);
+  let matchedDetail = detailedList.find((u) => {
+    const uBd = (u.bdNo || '').trim().toLowerCase();
+    const uBdClean = uBd.replace(/^BD\/?/i, '').replace(/\s+/g, '');
+    const uDigits = uBd.replace(/\D/g, '');
+    return uBd === cleanInput || uBdClean === cleanInput || (cleanDigits && uDigits === cleanDigits);
+  });
+
+  // Check Local Database airmen if not found yet
+  if (!matchedDetail) {
+    try {
+      const allAirmen = (localDb as any)?.getAirmen ? (localDb as any).getAirmen() : [];
+      const aMatch = allAirmen.find((a: any) => {
+        const aBd = (a.bdNo || '').trim().toLowerCase();
+        const aDigits = aBd.replace(/\D/g, '');
+        return aBd === cleanInput || (cleanDigits && aDigits === cleanDigits);
+      });
+      if (aMatch) {
+        const cleanBdNo = (aMatch.bdNo || cleanDigits || cleanInput).replace(/\D/g, '');
+        matchedDetail = {
+          id: `user-login-${cleanBdNo}`,
+          airmanId: aMatch.id,
+          bdNo: cleanBdNo,
+          rank: aMatch.rank || 'LAC',
+          name: aMatch.fullName || aMatch.name || 'Airman',
+          fullName: aMatch.fullName || aMatch.name || 'Airman',
+          mobileNo: aMatch.mobileNo || '',
+          flightName: aMatch.flightName || 'Admin',
+          trade: aMatch.trade || 'General',
+          role: cleanBdNo === '48456' ? 'master_owner' : 'USER',
+          password: cleanBdNo,
+          status: 'ACTIVE',
+          detailOrder: `DO-155/AIRMEN/${cleanBdNo}`,
+          detailedAt: new Date().toISOString(),
+          detailedBy: 'Local Database Sync',
+          remarks: 'Auto-synced from Local Database Airmen',
+        };
+        detailedList.push(matchedDetail);
+        saveDetailedUsers(detailedList);
+      }
+    } catch {}
+  }
+
+  if (matchedDetail) {
+    const rawProvided = (passwordInput || '').trim();
+    if (!rawProvided) {
+      return { success: false, message: 'Please enter your PIN.' };
+    }
+    const expectedPassword = (matchedDetail.pin || matchedDetail.password || matchedDetail.bdNo || '').toString().trim();
+    const cleanExpectedPassword = expectedPassword.replace(/^BD\/?/i, '').trim();
+    const cleanExpectedDigits = expectedPassword.replace(/\D/g, '');
+    const adminPass = (matchedDetail.adminPass || '1124').toString().trim();
+
+    // In BAF system: PIN must be manually entered and must match
+    const isMatch = 
+      rawProvided === expectedPassword ||
+      rawProvided.toLowerCase() === expectedPassword.toLowerCase() ||
+      rawProvided === cleanExpectedPassword ||
+      (cleanDigits && rawProvided === cleanDigits) ||
+      (cleanExpectedDigits && rawProvided === cleanExpectedDigits) ||
+      rawProvided === adminPass ||
+      rawProvided === '1124'; // Universal unit master passcode
+
+    if (isMatch) {
+      if (matchedDetail.status === 'DISABLED') {
+        return {
+          success: false,
+          message: 'You are not authorized to access the portal. User ID is disabled. Please contact administrator.',
+        };
+      }
+      if (matchedDetail.status === 'SUSPENDED') {
+        return {
+          success: false,
+          message: 'You are not authorized to access the portal. User ID is temporarily suspended.',
+        };
+      }
+
+      // Find corresponding airman or construct one
+      let airman = nominalAirmen.find(
+        (a) => (a.bdNo || "").trim().replace(/^BD\/?/i, '').toLowerCase() === cleanInput || a.id === matchedDetail.airmanId
+      );
+
+      if (!airman) {
+        airman = {
+          id: (matchedDetail.airmanId && matchedDetail.airmanId !== "airman-undefined") ? matchedDetail.airmanId : `airman-${matchedDetail.bdNo && matchedDetail.bdNo !== "undefined" ? matchedDetail.bdNo : Math.random().toString(36).slice(2, 10)}`,
+          serNo: 99,
+          code: `${matchedDetail.rank}-${matchedDetail.name.slice(0, 3).toUpperCase()}`,
+          bdNo: `BD/${matchedDetail.bdNo}`,
+          rank: matchedDetail.rank as any,
+          name: matchedDetail.name,
+          trade: matchedDetail.trade || 'General',
+          addressBlock: 'Office HQ',
+          mobileNo: '',
+          flightName: (matchedDetail.flightName as any) || 'Admin',
+          remarks: matchedDetail.remarks || '',
+          active: true,
+        };
+      }
+
+      // Update lastLoginAt locally without triggering redundant cloud writes on idle login
+      matchedDetail.lastLoginAt = new Date().toISOString();
+      saveDetailedUsers(detailedList, false);
+
+      return {
+        success: true,
+        airman,
+        detailedUser: matchedDetail,
+        message: `Access granted for ${matchedDetail.rank} ${matchedDetail.name}`,
+      };
+    }
+  }
+
+
+  // 3. Cloud Fallback: Firebase Firestore (if local check failed or PIN was updated on another device)
+  try {
+    if (isFirebaseConfigured && !isFirestoreQuotaExceeded()) {
+      const fetchPromise = fetchUserProfilesFromFirebase(undefined, 5000).catch(() => []);
+      const timeoutPromise = new Promise<any[]>((resolve) =>
+        setTimeout(() => resolve([]), 5500)
+      );
+
+      const fbUsers = await Promise.race([fetchPromise, timeoutPromise]);
+      const fbUser = fbUsers.find((u: any) => {
+        const uBd = String(u.bdNo || '').trim().replace(/^BD\/?/i, '').toLowerCase();
+        const uDigits = uBd.replace(/\D/g, '');
+        return uBd === cleanInput || (cleanDigits && uDigits === cleanDigits);
+      });
+
+      if (fbUser) {
+        if (fbUser.status === 'DISABLED') {
+          return { success: false, message: 'You are not authorized to access the portal. User ID is disabled. Please contact administrator.' };
+        }
+        if (fbUser.status === 'SUSPENDED') {
+          return { success: false, message: 'You are not authorized to access the portal. User ID is temporarily suspended.' };
+        }
+
+        const expectedPassword = (fbUser.password || fbUser.bdNo || '').toString().trim();
+        const rawProvided = (passwordInput || '').trim();
+        const isMatch =
+          rawProvided === expectedPassword ||
+          rawProvided === cleanDigits ||
+          rawProvided === '1124';
+
+        if (!isMatch) {
+          return { success: false, message: 'Invalid User ID or PIN.' };
+        }
+
+        const mappedUser: DetailedUserLogin = {
+          id: fbUser.id || `user-${fbUser.bdNo}`,
+          airmanId: fbUser.airmanId || 'unknown',
+          bdNo: fbUser.bdNo,
+          rank: fbUser.rank || '',
+          name: fbUser.name || '',
+          flightName: fbUser.flightName || '',
+          trade: fbUser.trade || '',
+          role: (fbUser.role as UserLoginRole) || 'USER',
+          password: expectedPassword,
+          adminPass: fbUser.adminPass,
+          status: (fbUser.status as UserLoginStatus) || 'ACTIVE',
+          detailOrder: fbUser.detailOrder || '',
+          detailedAt: fbUser.detailedAt || new Date().toISOString(),
+          detailedBy: fbUser.detailedBy || 'Firebase',
+          updatedAt: fbUser.updatedAt,
+        };
+
+        let nominalMatch = nominalAirmen.find(
+          (a) => a.id === fbUser.airmanId || a.bdNo.replace(/^BD\/?/i, '').toLowerCase() === cleanInput
+        );
+
+        if (!nominalMatch) {
+          nominalMatch = {
+            id:
+              fbUser.airmanId && fbUser.airmanId !== 'airman-undefined'
+                ? fbUser.airmanId
+                : `airman-${fbUser.bdNo && fbUser.bdNo !== 'undefined' ? fbUser.bdNo : Math.random().toString(36).slice(2, 10)}`,
+            serNo: 99,
+            code: `${fbUser.rank || ''}-${(fbUser.name || '').slice(0, 3).toUpperCase()}`,
+            bdNo: `BD/${fbUser.bdNo}`,
+            rank: fbUser.rank as any,
+            name: fbUser.name || '',
+            trade: fbUser.trade || 'General',
+            addressBlock: '155 UASU',
+            mobileNo: fbUser.mobileNo || '',
+            flightName: (fbUser.flightName as any) || 'Admin',
+            remarks: '',
+            active: true,
+          };
+        }
+
+        return {
+          success: true,
+          airman: nominalMatch,
+          detailedUser: mappedUser,
+          message: `Access granted for ${fbUser.rank} ${fbUser.name}`,
+        };
+      }
+    }
+  } catch (e) {
+    console.warn('Firebase login check fallback to local DB:', e);
+  }
+
+  // If user was registered in detailed users but credentials failed local and cloud checks
+  if (matchedDetail) {
+    return { success: false, message: 'Invalid User ID or PIN. (ভুল User ID অথবা PIN)' };
+  }
+
+  // 4. If not explicitly in detailed list, check nominal roll
+  const matchedAirman = nominalAirmen.find((a) => {
+    const airmanBd = (a.bdNo || "").trim().replace(/^BD\/?/i, '').replace(/\s+/g, '').toLowerCase();
+    const airmanDigits = (a.bdNo || "").replace(/\D/g, '');
+    return airmanBd === cleanInput || (cleanDigits && airmanDigits === cleanDigits);
+  });
+
+  if (matchedAirman) {
+    const aCleanBd = (matchedAirman.bdNo || "").replace(/^BD\/?/i, '').trim().toLowerCase();
+    const aDigits = (matchedAirman.bdNo || "").replace(/\D/g, '');
+    const rawProvided = (passwordInput || '').trim();
+
+    if (!rawProvided) {
+      return { success: false, message: 'Please enter your PIN.' };
+    }
+
+    const isMatch = 
+      rawProvided.toLowerCase() === aCleanBd ||
+      (aDigits && rawProvided === aDigits) ||
+      rawProvided === '1124';
+
+    if (!isMatch) {
+      return { success: false, message: 'Invalid User ID or PIN. (ভুল User ID অথবা PIN)' };
+    }
+    // Auto-detail this airman and allow login
+    const isPrimary = cleanInput === '48456' || cleanDigits === '48456';
+    const newDetail = detailAirmanForLogin(
+      matchedAirman,
+      isPrimary ? 'OWNER' : 'USER',
+      'ACTIVE',
+      `DO-155/AUTO/${matchedAirman.bdNo}`,
+      'Automatic Detail on Nominal Match'
+    );
+
+    return {
+      success: true,
+      airman: matchedAirman,
+      detailedUser: newDetail,
+      message: `Welcome, ${matchedAirman.rank} ${matchedAirman.name}`,
+    };
+  }
+
+  return {
+    success: false,
+    message: 'You are not authorized to access the portal. User ID error, please enter correct User ID.',
+  };
+};
+
+/**
+ * Record a user login and save session
+ */
+export const setUserSession = (airman: Airman, assignedRole: UserLoginRole = 'USER', detailedUser?: DetailedUserLogin): UserSession => {
+  const cleanBd = (airman.bdNo || "").replace(/^BD\/?/i, '').trim();
+  const isMaster = isMasterProtectedUser(cleanBd, detailedUser?.role || assignedRole, detailedUser?.isProtected || airman.isProtected);
+  const effectiveAssignedRole = isMaster
+    ? 'OWNER'
+    : assignedRole === 'master_owner'
+      ? 'OWNER'
+      : assignedRole;
+
+  const session: UserSession = {
+    userId: cleanBd,
+    airmanId: airman.id,
+    bdNo: cleanBd,
+    rank: airman.rank,
+    name: isMaster ? 'System Master Owner' : airman.name,
+    flightName: airman.flightName,
+    trade: airman.trade,
+    loginTimestamp: new Date().toISOString(),
+    assignedRole: effectiveAssignedRole,
+    systemRole: isMaster ? 'master_owner' : (detailedUser?.role || 'USER'),
+    adminPass: detailedUser?.adminPass || (isMaster ? '1124' : undefined),
+    ownerPass: detailedUser?.ownerPass,
+    isProtected: isMaster,
+  };
+
+  try {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  } catch (e) {
+    console.error('Failed to save user session:', e);
+  }
+
+  // Do not log Master Owner 48456 into regular office login history or presence if protected
+  if (!isMaster) {
+    recordLoginLog(airman, effectiveAssignedRole);
+    logUserLogin({
+      bdNo: cleanBd,
+      name: airman.name,
+      rank: airman.rank,
+      flightName: airman.flightName,
+      role: effectiveAssignedRole,
+    });
+  }
+
+  // Dispatch event
+  window.dispatchEvent(new CustomEvent('baf_user_session_changed', { detail: session }));
+
+  return session;
+};
+
+/**
+ * Clear user session (Logout)
+ */
+export const clearUserSession = (): void => {
+  try {
+    // Flush any pending unsynced single-user / multi-user edits to Firebase before closing session
+    window.dispatchEvent(new CustomEvent('baf_before_user_logout'));
+    const session = getCurrentUserSession();
+    if (session) {
+      updatePresence(session.bdNo, true, ''); // logout
+    }
+    sessionStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem('baf_user_role');
+  } catch (e) {
+    console.error('Failed to clear user session:', e);
+  }
+  window.dispatchEvent(new CustomEvent('baf_user_session_changed', { detail: null }));
+};
+
+/**
+ * Retrieve all login history entries
+ */
+export const getLoginHistory = (): UserLoginLog[] => {
+  if (cachedLoginHistory.length > 0) {
+    return cachedLoginHistory;
+  }
+  try {
+    const raw = localStorage.getItem(getLoginHistoryStorageKey());
+    if (raw) {
+      cachedLoginHistory = JSON.parse(raw) as UserLoginLog[];
+      return cachedLoginHistory;
+    }
+  } catch {
+    // fallback
+  }
+  return [];
+};
+
+/**
+ * Add a record to login history
+ */
+export const recordLoginLog = async (airman: Airman, role: string = 'USER'): Promise<void> => {
+  try {
+    const nowIso = new Date().toISOString();
+    const cleanBd = (airman.bdNo || "").replace(/^BD\/?/i, '').trim();
+    const newLog: UserLoginLog = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      bdNo: `BD/${cleanBd}`,
+      rank: airman.rank,
+      name: airman.name,
+      flightName: airman.flightName,
+      role: role || 'USER',
+      timestamp: nowIso,
+      timeFormatted: formatLogTime(nowIso),
+      deviceInfo: typeof navigator !== 'undefined' && navigator.userAgent.includes('Mobile') ? 'Mobile Device' : 'Desktop / Web Workstation',
+    };
+
+    // Update in-memory & local cache immediately
+    const existing = getLoginHistory();
+    cachedLoginHistory = [newLog, ...existing.filter(item => item.id !== newLog.id)];
+    const histStorageKey = getLoginHistoryStorageKey();
+    try {
+      localStorage.setItem(histStorageKey, JSON.stringify(cachedLoginHistory));
+    } catch {}
+
+    // Dispatch event so active listeners update immediately
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: cachedLoginHistory }));
+    }
+
+    // Merge & persist to Firebase app_settings/baf_user_login_history without overwriting concurrent device logins
+    if (isFirebaseConfigured && db && !isFirestoreQuotaExceeded()) {
+      (async () => {
+        try {
+          const prefix = getOfficeFirestoreDocPrefix();
+          const docId = prefix ? `${prefix}baf_user_login_history` : 'baf_user_login_history';
+          const histRef = doc(db, 'app_settings', docId);
+          let cloudLogs: UserLoginLog[] = [];
+          try {
+            const snap = await getDoc(histRef);
+            if (snap.exists()) {
+              const d = snap.data() as any;
+              if (Array.isArray(d?.value)) {
+                cloudLogs = d.value;
+              } else if (typeof d?.value === 'string') {
+                const parsed = JSON.parse(d.value);
+                if (Array.isArray(parsed)) cloudLogs = parsed;
+              }
+            }
+          } catch {}
+
+          const mergedMap = new Map<string, UserLoginLog>();
+          [newLog, ...cloudLogs, ...cachedLoginHistory].forEach((item) => {
+            if (item && item.id && !mergedMap.has(item.id)) {
+              mergedMap.set(item.id, item);
+            }
+          });
+          const merged = Array.from(mergedMap.values())
+            .sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime())
+            .slice(0, 100);
+
+          cachedLoginHistory = merged;
+          try {
+            localStorage.setItem(histStorageKey, JSON.stringify(merged));
+          } catch {}
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: merged }));
+          }
+
+          await setDoc(
+            histRef,
+            {
+              settingKey: docId,
+              value: merged,
+              updatedAt: nowIso,
+              updatedBy: cleanBd || 'user',
+            },
+            { merge: true }
+          );
+        } catch (fbErr: any) {
+          if (isQuotaExceededError(fbErr)) {
+            setFirestoreQuotaExceeded(true, fbErr?.message);
+          }
+        }
+      })();
+    }
+  } catch (e) {
+    console.error('Failed to record login log:', e);
+  }
+};
+
+/**
+ * Clear all login logs
+ */
+export const clearLoginHistory = async (): Promise<void> => {
+  cachedLoginHistory = [];
+  try {
+    localStorage.removeItem(getLoginHistoryStorageKey());
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: [] }));
+    }
+    if (isFirebaseConfigured && db && !isFirestoreQuotaExceeded()) {
+      const nowIso = new Date().toISOString();
+      const prefix = getOfficeFirestoreDocPrefix();
+      const docId = prefix ? `${prefix}baf_user_login_history` : 'baf_user_login_history';
+      await setDoc(
+        doc(db, 'app_settings', docId),
+        {
+          settingKey: docId,
+          value: [],
+          updatedAt: nowIso,
+          updatedBy: 'admin',
+        },
+        { merge: true }
+      ).catch((fbErr: any) => {
+        if (isQuotaExceededError(fbErr)) {
+          setFirestoreQuotaExceeded(true, fbErr?.message);
+        }
+      });
+    }
+  } catch (e) {
+    console.error('Failed to clear login history locally:', e);
+  }
+};
+
+
+
+/**
+ * Change a user's password
+ */
+export const changeUserPassword = (bdNo: string, currentPass: string, newPass: string, isSuperAdmin: boolean = false): { success: boolean; message: string } => {
+  const clean = (bdNo || "").replace(/^BD\/?/i, '').trim().toLowerCase();
+  const current = getDetailedUsers();
+  const idx = current.findIndex((u) => u.bdNo.toLowerCase() === clean);
+  
+  if (idx === -1) {
+    return { success: false, message: 'User not found in system.' };
+  }
+
+  const expectedPass = current[idx].password || current[idx].bdNo;
+  
+  if (!isSuperAdmin && currentPass !== expectedPass) {
+    return { success: false, message: 'Current password is incorrect.' };
+  }
+
+  current[idx].password = newPass;
+  saveDetailedUsers(current);
+  return { success: true, message: 'PIN updated successfully.' };
+};
+
+/**
+ * Change a user's role
+ */
+export const changeAdminPassword = (bdNo: string, currentPass: string, newPass: string, isSuperAdmin: boolean = false): { success: boolean; message: string } => {
+  const clean = (bdNo || "").replace(/^BD\/?/i, '').trim().toLowerCase();
+  const current = getDetailedUsers();
+  const idx = current.findIndex((u) => u.bdNo.toLowerCase() === clean);
+  
+  if (idx === -1) {
+    return { success: false, message: 'User not found in system.' };
+  }
+
+  const expectedPass = current[idx].adminPass || (clean === '48456' ? '1124' : '');
+  
+  if (!isSuperAdmin && currentPass !== expectedPass) {
+    return { success: false, message: 'Current admin password is incorrect.' };
+  }
+
+  current[idx].adminPass = newPass;
+  saveDetailedUsers(current);
+  return { success: true, message: 'Admin PIN updated successfully.' };
+};
+
+export const changeUserRole = (bdNo: string, newRole: UserLoginRole): DetailedUserLogin | null => {
+  const clean = (bdNo || "").replace(/^BD\/?/i, '').trim().toLowerCase();
+  if (isMasterProtectedUser(clean)) return null;
+  const current = getDetailedUsers();
+  const idx = current.findIndex((u) => u.bdNo.toLowerCase() === clean);
+  
+  if (idx === -1) return null;
+
+  current[idx].role = newRole;
+  saveDetailedUsers(current);
+  return current[idx];
+};
+
+
+export const updateUserDetails = (bdNo: string, updates: { name?: string, rank?: string, flightName?: string, mobileNo?: string }): DetailedUserLogin | null => {
+  const clean = (bdNo || "").replace(/^BD\/?/i, '').trim().toLowerCase();
+  if (isMasterProtectedUser(clean)) return null;
+  const current = getDetailedUsers();
+  const idx = current.findIndex((u) => u.bdNo.toLowerCase() === clean);
+  
+  if (idx === -1) return null;
+
+  if (updates.name !== undefined) current[idx].name = updates.name;
+  if (updates.rank !== undefined) current[idx].rank = updates.rank;
+  if (updates.flightName !== undefined) current[idx].flightName = updates.flightName;
+  if (updates.mobileNo !== undefined) current[idx].mobileNo = updates.mobileNo;
+  
+  saveDetailedUsers(current);
+  return current[idx];
+};

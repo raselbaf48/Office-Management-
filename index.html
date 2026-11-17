@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>155 UASU BAF | Office Management System</title>
+    <meta name="description" content="Military personnel duty register, parade state tracker, TDY register, and monthly roster management system for 155 UASU BAF BASE ZHR." />
+    <meta property="og:title" content="155 UASU BAF | Office Management System" />
+    <meta property="og:description" content="Military personnel duty register, parade state tracker, TDY register, and monthly roster management system for 155 UASU BAF BASE ZHR." />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=Noto+Serif+Bengali:wght@400;500;600;700;800;900&family=Tiro+Bangla:ital@0;1&display=swap" rel="stylesheet" crossorigin="anonymous">
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png?v=10" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/pwa-512x512.png?v=10" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=10" />
+    <link rel="manifest" href="/manifest.json?v=10" />
+    <style>
+      /* Hide scrollbars across all browsers, Android WebView, and APK */
+      *, *::before, *::after, html, body, #root {
+        scrollbar-width: none !important;
+        -ms-overflow-style: none !important;
+      }
+      ::-webkit-scrollbar,
+      *::-webkit-scrollbar,
+      html::-webkit-scrollbar,
+      body::-webkit-scrollbar,
+      #root::-webkit-scrollbar {
+        display: none !important;
+        width: 0px !important;
+        height: 0px !important;
+        background: transparent !important;
+        -webkit-appearance: none !important;
+        opacity: 0 !important;
+        visibility: hidden !important;
+      }
+      ::-webkit-scrollbar-thumb,
+      *::-webkit-scrollbar-thumb,
+      html::-webkit-scrollbar-thumb,
+      body::-webkit-scrollbar-thumb {
+        display: none !important;
+        width: 0px !important;
+        height: 0px !important;
+        background: transparent !important;
+      }
+      ::-webkit-scrollbar-track,
+      *::-webkit-scrollbar-track {
+        display: none !important;
+        background: transparent !important;
+      }
+      ::-webkit-scrollbar-corner,
+      *::-webkit-scrollbar-corner {
+        display: none !important;
+        background: transparent !important;
+      }
+    </style>
+    <meta name="theme-color" content="#020617" />
+    <style>
+      html, body {
+        background-color: #020617 !important;
+        color: #f8fafc !important;
+        margin: 0;
+        padding: 0;
+        min-height: 100vh;
+      }
+      @keyframes baf_pulse_anim {
+        0% { left: -50%; width: 50%; }
+        50% { left: 25%; width: 60%; }
+        100% { left: 100%; width: 50%; }
+      }
+    </style>
+  </head>
+  <body style="background-color: #020617; color: #f8fafc; margin: 0; min-height: 100vh;">
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(regs) {
+          for (var i = 0; i < regs.length; i++) regs[i].unregister();
+        }).catch(function() {});
+      }
+      window.__bafPreMountError = function(msg) {
+        var root = document.getElementById('root');
+        if (!root || !document.getElementById('baf-boot-loader')) return;
+        var title = document.getElementById('baf-boot-status');
+        var errBox = document.getElementById('baf-boot-error');
+        var retryBtn = document.getElementById('baf-boot-retry');
+        if (title) title.textContent = '155 UASU BAF • Loading Issue';
+        if (errBox) {
+          errBox.textContent = String(msg || 'Failed to load application modules.');
+          errBox.style.display = 'block';
+        }
+        if (retryBtn) retryBtn.style.display = 'inline-flex';
+      };
+      window.addEventListener('error', function(e) {
+        if (e && (e.message || e.filename)) {
+          var emsg = String(e.message || '');
+          if (emsg.indexOf('INTERNAL ASSERTION FAILED') !== -1 || emsg.indexOf('ID: c050') !== -1 || emsg.indexOf('ID: b815') !== -1) return;
+          window.__bafPreMountError((e.message || 'Script error') + (e.filename ? ' (' + e.filename + ')' : ''));
+        }
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        var reason = e && e.reason ? (e.reason.message || String(e.reason)) : '';
+        if (!reason || reason.indexOf('WebSocket') !== -1 || reason.indexOf('@vite/client') !== -1 || reason.indexOf('INTERNAL ASSERTION FAILED') !== -1 || reason.indexOf('ID: c050') !== -1 || reason.indexOf('ID: b815') !== -1) return;
+        window.__bafPreMountError(reason);
+      });
+    </script>
+    <div id="root">
+      <div id="baf-boot-loader" style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;font-family:Inter,system-ui,-apple-system,sans-serif;background:#020617;color:#f8fafc;">
+        <div style="width:48px;height:48px;border-radius:14px;background:rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.35);display:flex;align-items:center;justify-content:center;margin-bottom:16px;">
+          <div style="width:22px;height:22px;border:2.5px solid rgba(52,211,153,0.25);border-top-color:#34d399;border-radius:50%;animation:baf_spin 0.8s linear infinite;"></div>
+        </div>
+        <div id="baf-boot-status" style="font-size:13px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#e2e8f0;">155 UASU BAF</div>
+        <div style="margin-top:6px;font-size:11px;color:#94a3b8;">Loading portal...</div>
+        <div id="baf-boot-error" style="display:none;margin-top:16px;max-width:420px;padding:10px 12px;border-radius:10px;background:#0f172a;border:1px solid #334155;color:#fda4af;font-size:11px;font-family:monospace;word-break:break-word;"></div>
+        <button id="baf-boot-retry" type="button" onclick="window.location.reload()" style="display:none;margin-top:14px;padding:9px 18px;border-radius:10px;border:none;background:#059669;color:#ffffff;font-size:12px;font-weight:700;cursor:pointer;">Reload Application</button>
+      </div>
+      <style>@keyframes baf_spin{to{transform:rotate(360deg)}}</style>
+    </div>
+    <script type="module" src="/src/main.tsx" onerror="window.__bafPreMountError && window.__bafPreMountError('Failed to fetch /src/main.tsx')"></script>
+  </body>
+</html>
+

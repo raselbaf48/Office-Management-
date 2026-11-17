@@ -1,0 +1,526 @@
+import { supabase } from '../supabase';
+import { localDb } from './localDatabase';
+import { getCurrentUserSession } from '../utils/authSession';
+import { checkDutyPermission } from '../utils/dutyPermissions';
+import { isDefault155UasuOffice } from '../firebase';
+
+/**
+ * Universal API Bridge & Fallback Interceptor
+ * Ensures that all data operations (Parade State, Duty Assignment, Leave, TDY,
+ * Airmen CRUD, Duty Roster, Analytics, Settings) work seamlessly on Cloudflare Pages,
+ * static deployments, and offline environments.
+ */
+
+let rawNativeFetch: typeof window.fetch | null = null;
+
+export function installApiInterceptor() {
+  if (typeof window === 'undefined' || (window as any).__baf_interceptor_installed) {
+    return;
+  }
+
+  const originalFetch = window.fetch ? window.fetch.bind(window) : null;
+  if (!originalFetch) return;
+  rawNativeFetch = originalFetch;
+  if (typeof window !== 'undefined') {
+    (window as any).__baf_raw_fetch = originalFetch;
+  }
+
+  const customFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+    // Only intercept /api/* routes
+    if (urlStr.startsWith('/api/') || urlStr.startsWith('api/') || urlStr.includes('/api/')) {
+      // Do not intercept supabase proxy calls, database exports, or direct server data endpoints
+      if (
+        urlStr.includes('/api/supabase') ||
+        urlStr.includes('/api/server-history') ||
+        urlStr.includes('/api/roster/server-history') ||
+        urlStr.includes('/api/database') ||
+        urlStr.includes('/api/canteen/all-settings') ||
+        urlStr.includes('/api/canteen/export-full-backup') ||
+        urlStr.includes('/api/canteen/save-setting') ||
+        urlStr.includes('/api/canteen/restore-full-backup') ||
+        urlStr.includes('/api/full-system')
+      ) {
+        return originalFetch(input, init);
+      }
+
+      const urlObj = new URL(urlStr, window.location.origin);
+      // Immediately handle client-side local routes with 0ms latency so the UI never hangs
+      if (
+        urlObj.pathname === '/api/parade-state' ||
+        urlObj.pathname === '/api/analytics' ||
+        urlObj.pathname === '/api/roster/history' ||
+        urlObj.pathname === '/api/airmen' ||
+        urlObj.pathname === '/api/duty-types' ||
+        urlObj.pathname === '/api/duty-assignments' ||
+        urlObj.pathname.startsWith('/api/roster')
+      ) {
+        // For data mutations (assign, delete), sync in background to local server ONLY for default 155 UASU office
+        if (init?.method && init.method.toUpperCase() !== 'GET' && isDefault155UasuOffice()) {
+          originalFetch(input, init).catch(() => {});
+        }
+        return handleLocalApiRequest(urlStr, init);
+      }
+      try {
+        // Fast timeout of 1500ms so static hosting or sleeping servers never freeze the UI
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 1500);
+        const reqInit: RequestInit = { ...(init || {}), signal: controller.signal };
+
+        const networkResponse = await originalFetch(input, reqInit);
+        clearTimeout(timeoutId);
+        const contentType = networkResponse.headers.get('content-type') || '';
+
+        // If the server responded with valid JSON and not 404/500/HTML
+        if (networkResponse.ok && contentType.includes('application/json')) {
+          const urlObj = new URL(urlStr, window.location.origin);
+          if (urlObj.pathname === '/api/sync-google-sheet') {
+            try {
+              const clone = networkResponse.clone();
+              const data = await clone.json();
+              if (data && data.airmen) {
+                // Perform a bulk merge into localDb
+                localDb.bulkAddAirmen(data.airmen);
+              }
+            } catch (err) {
+              console.error('Error parsing sync-google-sheet response in interceptor:', err);
+            }
+          }
+          return networkResponse;
+        }
+      } catch (networkErr) {
+        // Backend unavailable or timed out -> handle via local engine immediately
+      }
+
+      // Handle locally
+      return handleLocalApiRequest(urlStr, init);
+    }
+
+    return originalFetch(input, init);
+  };
+
+  try {
+    Object.defineProperty(window, 'fetch', {
+      value: customFetch,
+      writable: true,
+      configurable: true,
+    });
+    (window as any).__baf_interceptor_installed = true;
+    console.log('✅ BAF 155 UASU Local Data & API Bridge Active');
+  } catch (err) {
+    try {
+      (window as any).fetch = customFetch;
+      (window as any).__baf_interceptor_installed = true;
+    } catch (fallbackErr) {
+      console.warn('Could not override window.fetch:', fallbackErr);
+    }
+  }
+}
+
+async function handleLocalApiRequest(urlStr: string, init?: RequestInit): Promise<Response> {
+  const url = new URL(urlStr, window.location.origin);
+  const pathname = url.pathname;
+  const method = (init?.method || 'GET').toUpperCase();
+  const searchParams = url.searchParams;
+
+  let body: any = null;
+  if (init?.body && typeof init.body === 'string') {
+    try {
+      body = JSON.parse(init.body);
+    } catch {
+      body = init.body;
+    }
+  }
+
+  try {
+    // 1. Health
+    if (pathname === '/api/health') {
+      return jsonResponse({ status: 'ok', engine: 'client-bridge', personnelCount: localDb.getAirmen().length });
+    }
+
+    // 2. Airmen CRUD
+    if (pathname === '/api/airmen/bulk') {
+      if (method === 'POST') {
+        const { airmen: airmenList } = body || {};
+        const result = localDb.bulkAddAirmen(airmenList || []);
+        return jsonResponse(result, 201);
+      }
+    }
+
+    if (pathname === '/api/airmen') {
+      if (method === 'GET') {
+        const flight = searchParams.get('flight') || undefined;
+        const rank = searchParams.get('rank') || undefined;
+        const search = searchParams.get('search') || undefined;
+        const airmen = localDb.getAirmen({ flight, rank, search });
+        return jsonResponse(airmen);
+      }
+      if (method === 'POST') {
+        const newAirman = localDb.addAirman(body);
+        return jsonResponse(newAirman, 201);
+      }
+    }
+
+    if (pathname.startsWith('/api/airmen/')) {
+      const id = (pathname || "").replace('/api/airmen/', '');
+      if (method === 'PUT') {
+        const updated = await localDb.updateAirman(id, body);
+        return updated ? jsonResponse(updated) : jsonResponse({ error: 'Airman not found' }, 404);
+      }
+      if (method === 'DELETE') {
+        const target = localDb.db.airmen.find(a => a.id === id);
+        const ok = localDb.deleteAirman(id);
+        if (ok) {
+           try {
+              const { supabase, isSupabaseConfigured } = await import('../supabase');
+              if (isSupabaseConfigured) {
+                 await supabase.from('duty_rosters').delete().eq('airman_id', id);
+                 await supabase.from('staff').delete().eq('airman_id', id);
+                 if (target?.bdNo) {
+                    await supabase.from('user_profiles').delete().eq('User ID', target.bdNo);
+                 }
+              }
+           } catch(e) {
+              console.warn('Supabase delete failed', e.message);
+           }
+        }
+        return ok ? jsonResponse({ success: true }) : jsonResponse({ error: 'Airman not found' }, 404);
+      }
+    }
+
+    if (pathname.startsWith('/api/users/')) {
+       const bdNo = (pathname || "").replace('/api/users/', '');
+       if (method === 'DELETE') {
+          if (localDb.db.detailedUsers) {
+             localDb.db.detailedUsers = localDb.db.detailedUsers.filter(u => u.bdNo !== bdNo);
+             localDb.saveToStorage();
+          }
+          try {
+          } catch(e){}
+          return jsonResponse({ success: true });
+       }
+    }
+    
+    // 3. Duty Types
+    if (pathname === '/api/duty-types') {
+      const { DUTY_TYPES } = await import('../data/dutyTypes');
+      return jsonResponse(DUTY_TYPES);
+    }
+
+    // 4. Roster
+    if (pathname === '/api/roster') {
+      const month = searchParams.get('month') || undefined;
+      const data = localDb.getRoster(month);
+      return jsonResponse(data);
+    }
+
+    if (pathname === '/api/roster/year') {
+      const year = searchParams.get('year') ? parseInt(searchParams.get('year')!, 10) : undefined;
+      const data = localDb.getRosterYear(year);
+      return jsonResponse(data);
+    }
+
+    if (pathname === '/api/duty-assignments') {
+      return jsonResponse(localDb.getDb()?.assignments || {});
+    }
+
+    // Helper to verify duty write permissions
+    const verifyDutyWritePermission = (targetAirmanId?: string, targetDate?: string, targetFlight?: string) => {
+      const session = getCurrentUserSession();
+      if (!session) {
+        return { canAssign: true, canEdit: true, canDelete: true };
+      }
+      const role = (session?.assignedRole as any) || 'ADMIN';
+      if (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') {
+        return { canAssign: true, canEdit: true, canDelete: true };
+      }
+      let flight = targetFlight;
+      if (!flight && targetAirmanId) {
+        const air = localDb.getAirmen().find(a => a.id === targetAirmanId);
+        flight = air?.flightName;
+      }
+      const res = checkDutyPermission(role, flight, targetDate, session?.flightName);
+      // Ensure unit duty assignment actions in workstation UI are not blocked
+      if (!res.canAssign && (role === 'USER' || !role)) {
+        return { canAssign: true, canEdit: true, canDelete: true };
+      }
+      return res;
+    };
+
+    // 5. Duty Assignment Actions
+    if (pathname === '/api/roster/assign') {
+      const { monthKey, assignment } = body || {};
+      const targetMonth = monthKey || assignment?.date?.slice(0, 7);
+      const perm = verifyDutyWritePermission(assignment?.airmanId, assignment?.date);
+      if (!perm.canAssign) {
+        return jsonResponse({ error: perm.reason || 'Permission denied' }, 403);
+      }
+      const res = localDb.assignDuty(targetMonth, assignment);
+      return jsonResponse({ success: true, assignment: res });
+    }
+
+    if (pathname === '/api/roster/assign-range') {
+      const { airmanId, fromDate } = body || {};
+      const perm = verifyDutyWritePermission(airmanId, fromDate);
+      if (!perm.canAssign) {
+        return jsonResponse({ error: perm.reason || 'Permission denied' }, 403);
+      }
+      const res = localDb.assignRange(body);
+      return jsonResponse({ success: true, ...res });
+    }
+
+    if (pathname === '/api/roster/batch-assign' || pathname === '/api/roster/bulk-assign') {
+      const session = getCurrentUserSession();
+      const role = session?.assignedRole || 'USER';
+      if (role === 'USER') {
+        return jsonResponse({ error: 'Permission denied: Regular users have read-only access' }, 403);
+      }
+      const res = localDb.batchAssign(body);
+      return jsonResponse({ success: true, message: `Assigned ${res.count} duties successfully!`, ...res });
+    }
+
+    if (pathname === '/api/roster/restore-assignments') {
+      const session = getCurrentUserSession();
+      const role = session?.assignedRole || 'USER';
+      if (role === 'USER') {
+        return jsonResponse({ error: 'Permission denied: Regular users have read-only access' }, 403);
+      }
+      const { restoreItems } = body || {};
+      if (Array.isArray(restoreItems)) {
+        restoreItems.forEach((item: any) => {
+          if (!item.airmanId || !item.date) return;
+          const monthKey = item.date.slice(0, 7);
+          if (item.assignment === null) {
+            localDb.deleteAssignment(item.airmanId, item.date);
+          } else if (item.assignment) {
+            localDb.assignDuty(monthKey, item.assignment);
+          }
+        });
+      }
+      return jsonResponse({ success: true, count: restoreItems?.length || 0 });
+    }
+
+    if (pathname === '/api/roster/clear-all') {
+      const session = getCurrentUserSession();
+      if (session?.assignedRole !== 'OWNER' && session?.assignedRole !== 'SUPER_ADMIN') {
+        return jsonResponse({ error: 'Permission denied: Only Super Admin and Owner can clear all duties' }, 403);
+      }
+      localDb.resetToEmptyRoster();
+      return jsonResponse({ success: true, message: 'All duties cleared' });
+    }
+
+    if (pathname === '/api/roster/clear-month') {
+      const session = getCurrentUserSession();
+      if (session?.assignedRole !== 'OWNER' && session?.assignedRole !== 'SUPER_ADMIN') {
+        return jsonResponse({ error: 'Permission denied: Only Super Admin and Owner can clear monthly duties' }, 403);
+      }
+      const { monthKey } = body || {};
+      if (monthKey) {
+        localDb.clearMonth(monthKey);
+      }
+      return jsonResponse({ success: true, message: `Duties for ${monthKey} cleared` });
+    }
+
+    if (pathname === '/api/roster/reset-official') {
+      const session = getCurrentUserSession();
+      if (session?.assignedRole !== 'OWNER' && session?.assignedRole !== 'SUPER_ADMIN') {
+        return jsonResponse({ error: 'Permission denied: Only Super Admin and Owner can reset official data' }, 403);
+      }
+      localDb.resetToOfficialData();
+      return jsonResponse({ success: true, message: 'Reset to official parade state data' });
+    }
+
+    if (pathname === '/api/roster/delete-assignment') {
+      const { airmanId, date, dutyCode, idaShift } = body || {};
+      const perm = verifyDutyWritePermission(airmanId, date);
+      if (!perm.canDelete) {
+        return jsonResponse({ error: perm.reason || 'Permission denied' }, 403);
+      }
+      localDb.deleteAssignment(airmanId, date, dutyCode, idaShift);
+      return jsonResponse({ success: true });
+    }
+
+    if (pathname === '/api/roster/delete-range') {
+      const { airmanId, fromDate } = body || {};
+      const perm = verifyDutyWritePermission(airmanId, fromDate);
+      if (!perm.canDelete) {
+        return jsonResponse({ error: perm.reason || 'Permission denied' }, 403);
+      }
+      const count = localDb.deleteRange(body);
+      return jsonResponse({ success: true, count });
+    }
+
+    // 6. Parade State & PT State
+    if (pathname === '/api/parade-state') {
+      const date = searchParams.get('date') || undefined;
+      const shift = (searchParams.get('shift') as any) || 'Morning';
+      const flight = (searchParams.get('flight') as any) || 'Overall';
+      const stateType = searchParams.get('stateType') || searchParams.get('documentType') || 'PARADE';
+      const paradeData = localDb.getParadeState({ date, shift, flight, stateType });
+      return jsonResponse(paradeData);
+    }
+
+    // 7. Analytics
+    if (pathname === '/api/analytics') {
+      const month = searchParams.get('month') || undefined;
+      const analytics = localDb.getAnalytics(month);
+      return jsonResponse(analytics);
+    }
+
+    // 8. History
+    if (pathname === '/api/roster/history') {
+      let history = localDb.getHistory();
+      if (isDefault155UasuOffice() && (!history || history.length < 30)) {
+        try {
+          const fetcher = rawNativeFetch || (typeof window !== 'undefined' ? window.fetch : null);
+          if (fetcher) {
+            const srvRes = await fetcher('/api/server-history');
+            if (srvRes.ok) {
+              const srvData = await srvRes.json();
+              if (srvData && Array.isArray(srvData.history) && srvData.history.length > 0) {
+                localDb.mergeHistory(srvData.history);
+                history = localDb.getHistory();
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('Failed to fetch server history fallback:', e);
+        }
+      }
+      return jsonResponse({ history });
+    }
+
+    if (pathname === '/api/roster/undo-history') {
+      const { historyId } = body || {};
+      const ok = localDb.undoHistory(historyId);
+      return jsonResponse({ success: ok });
+    }
+    if (pathname === '/api/roster/delete-history-entry') {
+      const { historyId } = body || {};
+      const ok = localDb.deleteHistoryEntry(historyId);
+      return jsonResponse({ success: ok });
+    }
+    if (pathname === '/api/system/log-action') {
+      const { airmanId, airmanName, description } = body || {};
+      localDb.logSystemAction(airmanId, airmanName, description);
+      return jsonResponse({ success: true });
+    }
+
+    // 9. Auth & Passcode
+    if (pathname === '/api/auth/verify') {
+      const { passcode } = body || {};
+      const ok = localDb.verifyPasscode(passcode);
+      if (ok) return jsonResponse({ success: true, role: 'ADMIN' });
+      return jsonResponse({ success: false, error: 'Incorrect passcode' }, 401);
+    }
+
+    if (pathname === '/api/auth/change-passcode') {
+      const { currentPasscode, newPasscode } = body || {};
+      const ok = localDb.changePasscode(currentPasscode, newPasscode);
+      if (ok) return jsonResponse({ success: true, message: 'Passcode changed' });
+      return jsonResponse({ error: 'Passcode update failed' }, 400);
+    }
+
+    // 10. Document & PDF Import Endpoints
+
+        
+    if (pathname === '/api/import/load-official-roster') {
+      const { targetYear, monthChoice } = body || {};
+      const result = localDb.loadOfficialRoster(targetYear, monthChoice);
+      return jsonResponse(result);
+    }
+
+    if (pathname === '/api/import/apply-duty-data') {
+      const { assignments, sourceDoc } = body || {};
+      const result = localDb.applyDutyData(assignments, sourceDoc);
+      return jsonResponse({ success: true, ...result });
+    }
+
+    if (pathname === '/api/import/history') {
+      const history = localDb.getImportHistory();
+      return jsonResponse({ history });
+    }
+
+    if (pathname.startsWith('/api/import/history/')) {
+      const batchId = (pathname || "").replace('/api/import/history/', '');
+      const ok = localDb.deleteImportHistory(batchId);
+      return jsonResponse({ success: ok });
+    }
+
+    if (pathname === '/api/import/revert-batch') {
+      const { batchId } = body || {};
+      const ok = localDb.deleteImportHistory(batchId);
+      return jsonResponse({ success: ok });
+    }
+
+    // 11. Database Backup & Restore
+    if (pathname === '/api/database/export' || pathname === '/api/database/backup') {
+      const exportJson = localDb.exportDatabase();
+      return new Response(exportJson, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Disposition': 'attachment; filename="155_uasu_duty_database.json"',
+        },
+      });
+    }
+
+    if (pathname === '/api/database/restore') {
+      const ok = localDb.restoreDatabase(body);
+      return ok ? jsonResponse({ success: true, message: 'Database restored successfully' }) : jsonResponse({ error: 'Invalid restore payload' }, 400);
+    }
+
+    // 12. SSE Realtime Event stub for static frontend
+    if (pathname === '/api/realtime/events') {
+      return new Response('data: {"type":"CONNECTED"}\n\n', {
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }
+
+    // 13. Canteen Settings Local Bridge (Supports static Cloudflare Pages hosting)
+    if (pathname === '/api/canteen/all-settings') {
+      const items: any[] = [];
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && (k.startsWith('canteen_') || k.startsWith('baf_'))) {
+            items.push({
+              setting_key: k,
+              setting_value: localStorage.getItem(k) || '',
+              updated_at: new Date().toISOString()
+            });
+          }
+        }
+      } catch {}
+      return jsonResponse(items);
+    }
+
+    if (pathname === '/api/canteen/save-setting') {
+      const { setting_key, setting_value } = body || {};
+      if (setting_key && typeof window !== 'undefined') {
+        try {
+          const str = typeof setting_value === 'string' ? setting_value : JSON.stringify(setting_value);
+          localStorage.setItem(setting_key, str);
+        } catch {}
+      }
+      return jsonResponse({ success: true, setting_key });
+    }
+
+    // Default fallback: return empty object or success
+    return jsonResponse({ success: true, message: 'Handled by Local Bridge' });
+  } catch (err: any) {
+    console.warn('Local Bridge API Error:', err.message);
+    return jsonResponse({ error: err.message || 'Internal local bridge error' }, 500);
+  }
+}
+
+function jsonResponse(data: any, status: number = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Served-By': 'BAF-Local-Bridge',
+    },
+  });
+}
