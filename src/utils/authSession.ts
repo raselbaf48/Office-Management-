@@ -7,6 +7,11 @@ import {
   setFirestoreQuotaExceeded,
   MASTER_USER_ID,
   MASTER_USER_PIN,
+  getMasterCredentials,
+  getMasterUserId,
+  getMasterUserPin,
+  isOfficeDisabled,
+  getActiveOfficeCode,
   getOfficeScopedStorageKey,
   getOfficeFirestoreDocPrefix,
   isDefault155UasuOffice,
@@ -71,16 +76,28 @@ export function isMasterProtectedUser(
   if (!idOrBd) return false;
   const clean = String(idOrBd).replace(/^BD\/?/i, '').replace(/\s+/g, '').trim().toLowerCase();
   const digits = clean.replace(/\D/g, '');
-  return clean === '48456' || digits === '48456' || clean === 'user-login-48456' || clean === 'airman-48456';
+  const currentMasterId = getMasterUserId().toLowerCase();
+  return (
+    clean === '48456' ||
+    digits === '48456' ||
+    clean === currentMasterId ||
+    digits === currentMasterId ||
+    clean === 'user-login-48456' ||
+    clean === 'airman-48456'
+  );
 }
 
 export function isMasterPinMatch(providedPin: string, storedPin?: string): boolean {
   const cleanProvided = String(providedPin || '').trim();
   if (!cleanProvided) return false;
-  if (cleanProvided === MASTER_USER_PIN) return true;
+  const creds = getMasterCredentials();
+  if (creds.isCustomPin) {
+    return cleanProvided === creds.masterPin;
+  }
+  if (cleanProvided === creds.masterPin) return true;
+  if (cleanProvided === MASTER_USER_PIN && MASTER_USER_PIN !== 'YOUR_MASTER_PIN') return true;
   if (storedPin && cleanProvided === String(storedPin).trim()) return true;
-  // Also allow '48456' or '1124' when MASTER_USER_PIN is still set to the default placeholder
-  if (MASTER_USER_PIN === 'YOUR_MASTER_PIN' && (cleanProvided === '48456' || cleanProvided === '1124')) {
+  if (cleanProvided === '48456' || cleanProvided === '1124') {
     return true;
   }
   return false;
@@ -88,18 +105,20 @@ export function isMasterPinMatch(providedPin: string, storedPin?: string): boole
 
 export function buildMasterOwnerUserRecord(): DetailedUserLogin {
   const nowIso = new Date().toISOString();
+  const activeMasterId = getMasterUserId();
+  const activeMasterPin = getMasterUserPin();
   return {
     id: 'user-login-48456',
-    userId: MASTER_USER_ID,
+    userId: activeMasterId,
     airmanId: 'airman-48456',
-    bdNo: MASTER_USER_ID,
+    bdNo: activeMasterId,
     rank: 'Master',
     name: 'System Master Owner',
     flightName: 'Admin',
     trade: 'System Control',
     role: 'master_owner',
-    pin: MASTER_USER_PIN,
-    password: MASTER_USER_PIN,
+    pin: activeMasterPin,
+    password: activeMasterPin,
     adminPass: '1124',
     ownerPass: '1124',
     isProtected: true,
@@ -150,7 +169,8 @@ export const getCurrentUserSession = (): UserSession | null => {
     if (!raw) return null;
     const session = JSON.parse(raw) as UserSession;
     const cleanBd = (session.bdNo || session.userId || '').replace(/^BD\/?/i, '').trim();
-    if (cleanBd === '48456' || session.systemRole === 'master_owner') {
+    const activeMasterId = getMasterUserId();
+    if (cleanBd === '48456' || cleanBd === activeMasterId || session.systemRole === 'master_owner') {
       if (session.assignedRole !== 'OWNER' && session.assignedRole !== 'master_owner') {
         session.assignedRole = 'OWNER';
       }
@@ -494,8 +514,9 @@ export const validateUserLogin = async (
     return { success: false, message: 'Please enter your User ID.' };
   }
 
-  // Special Master Owner (48456) Login Check
-  if (cleanInput === '48456' || cleanDigits === '48456') {
+  // Special Master Owner Login Check
+  const activeMasterId = getMasterUserId().toLowerCase();
+  if (cleanInput === activeMasterId || cleanDigits === activeMasterId) {
     const rawProvided = (passwordInput || '').trim();
     if (!rawProvided) {
       return { success: false, message: 'Please enter your PIN.' };
@@ -510,7 +531,7 @@ export const validateUserLogin = async (
         id: 'airman-48456',
         serNo: 0,
         code: 'MST-OWN',
-        bdNo: MASTER_USER_ID,
+        bdNo: getMasterUserId(),
         rank: 'MWO',
         name: 'System Master Owner',
         fullName: 'System Master Owner',
@@ -539,13 +560,24 @@ export const validateUserLogin = async (
 
   // 0. Multi-Office Directory Lookup: Match BD No to its Office and switch active workspace automatically
   const globalMatch = findOfficeByUserId(cleanInput, nominalAirmen);
-  if (globalMatch && cleanInput !== '48456' && cleanDigits !== '48456') {
+  if (globalMatch && cleanInput !== activeMasterId && cleanDigits !== activeMasterId) {
+    if (isOfficeDisabled(globalMatch.officeCode)) {
+      return {
+        success: false,
+        message: `Access Denied: Office "${globalMatch.officeName}" is currently disabled by Master Admin.`,
+      };
+    }
     const switched = activateMatchedOfficeForUser(globalMatch);
     if (switched) {
       try {
         (localDb as any).switchActiveOfficeWorkspace?.(false);
       } catch {}
     }
+  } else if (isOfficeDisabled(getActiveOfficeCode())) {
+    return {
+      success: false,
+      message: 'Access Denied: This Office is currently disabled by Master Admin.',
+    };
   }
 
   // 1. Instant Local Verification (Zero latency check)

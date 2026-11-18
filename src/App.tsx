@@ -91,6 +91,7 @@ import {
   isFirebaseConfigured,
   getActiveOfficeIdentity,
   updateOfficeTelemetryUserCount,
+  syncBrowserTabIdentity,
 } from './firebase';
 import { setLastUsedPortal } from './services/portalPreferenceService';
 import { initGoogleDriveAuth } from './services/googleDriveService';
@@ -113,6 +114,14 @@ export default function App() {
   const [justLoggedIn, setJustLoggedIn] = useState<boolean>(false);
   const [standaloneView, setStandaloneView] = useState<'backup' | null>(null);
 
+  // Sync Browser Tab Title & Favicon with logged-in Office Name & Logo
+  useEffect(() => {
+    if (userSession) {
+      const activeId = getActiveOfficeIdentity();
+      syncBrowserTabIdentity(activeId.officeName, activeId.officeLogo, activeId.officeBase);
+    }
+  }, [userSession, officeIdentity]);
+
   useEffect(() => {
     const handleOpenStandalone = (e: any) => {
       if (e.detail === 'backup') {
@@ -120,7 +129,11 @@ export default function App() {
       }
     };
     const handleOfficeConfigChange = () => {
-      setOfficeIdentity(getActiveOfficeIdentity());
+      const nextId = getActiveOfficeIdentity();
+      setOfficeIdentity(nextId);
+      if (getCurrentUserSession()) {
+        syncBrowserTabIdentity(nextId.officeName, nextId.officeLogo, nextId.officeBase);
+      }
       const currentAirmen = (localDb as any)?.getAirmen ? (localDb as any).getAirmen() : [];
       if (Array.isArray(currentAirmen)) {
         setAirmen([...currentAirmen]);

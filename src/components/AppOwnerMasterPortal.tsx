@@ -21,18 +21,33 @@ import {
   Clock,
   Search,
   CheckCircle2,
-  XCircle,
   ClipboardCheck,
   Phone,
   Briefcase,
+  History,
+  Trash2,
+  Ban,
+  Power,
+  KeyRound,
+  Settings,
+  Save,
+  ShieldCheck,
+  ChevronRight,
+  MapPin,
+  Sparkles,
 } from 'lucide-react';
 import { signOut } from 'firebase/auth';
 import {
   masterAuth,
   MASTER_USER_ID,
   MASTER_USER_PIN,
+  getMasterCredentials,
+  getMasterUserId,
+  saveMasterCredentials,
+  syncMasterCredentialsFromCloud,
   RegisteredOfficeTelemetry,
   PendingOfficeRegistrationRequest,
+  getRegisteredOfficesLocal,
   fetchRegisteredOfficesFromMaster,
   fetchPendingOfficeRequestsFromMaster,
   getPendingOfficeRequestsLocal,
@@ -41,6 +56,12 @@ import {
   saveCustomOfficeConfig,
   clearCustomOfficeConfig,
   updateActiveOfficeProfile,
+  toggleRegisteredOfficeStatus,
+  removeRegisteredOffice,
+  getOfficeLoginHistoryLocal,
+  fetchOfficeLoginHistory,
+  clearOfficeLoginHistoryByCode,
+  syncBrowserTabIdentity,
 } from '../firebase';
 import {
   loginAsMasterOwnerSession,
@@ -58,6 +79,26 @@ interface AppOwnerMasterPortalProps {
   onEnterOfficeAsMaster: () => void;
 }
 
+type ConfirmActionState =
+  | {
+      type: 'APPROVE_REQUEST';
+      req: PendingOfficeRegistrationRequest;
+    }
+  | {
+      type: 'REJECT_REQUEST';
+      req: PendingOfficeRegistrationRequest;
+    }
+  | {
+      type: 'TOGGLE_OFFICE_STATUS';
+      office: RegisteredOfficeTelemetry;
+      nextStatus: 'ACTIVE' | 'DISABLED';
+    }
+  | {
+      type: 'REMOVE_OFFICE';
+      office: RegisteredOfficeTelemetry;
+    }
+  | null;
+
 export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   isOpen,
   onClose,
@@ -73,15 +114,22 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   const [authError, setAuthError] = useState<string>('');
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
 
+  const [currentMasterCreds, setCurrentMasterCreds] = useState(() => getMasterCredentials());
+
+  // Pre-load synchronously at 0ms so there is NEVER a loading screen or 0-count flash
   const [officeRequests, setOfficeRequests] = useState<PendingOfficeRegistrationRequest[]>(() =>
     getPendingOfficeRequestsLocal()
   );
-  const [activeTab, setActiveTab] = useState<'offices' | 'approvals'>(() => {
+  const [offices, setOffices] = useState<RegisteredOfficeTelemetry[]>(() =>
+    getRegisteredOfficesLocal()
+  );
+
+  const [activeTab, setActiveTab] = useState<'offices' | 'approvals' | 'settings'>(() => {
     const initialReqs = getPendingOfficeRequestsLocal();
     return initialReqs.some((r) => r.status === 'PENDING') ? 'approvals' : 'offices';
   });
-  const [offices, setOffices] = useState<RegisteredOfficeTelemetry[]>([]);
-  const [isLoadingOffices, setIsLoadingOffices] = useState<boolean>(false);
+
+  const [isSyncingBackground, setIsSyncingBackground] = useState<boolean>(false);
   const [processingRequestId, setProcessingRequestId] = useState<string | null>(null);
   const [approvalBanner, setApprovalBanner] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -89,17 +137,65 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   const [enteringProjectId, setEnteringProjectId] = useState<string | null>(null);
   const didInitialTabSelectRef = React.useRef<boolean>(false);
 
-  const loadMasterData = async (showSpinner: boolean = false) => {
-    if (showSpinner && offices.length === 0) {
-      setIsLoadingOffices(true);
+  // Confirmation Popup Modal State
+  const [confirmAction, setConfirmAction] = useState<ConfirmActionState>(null);
+  const [isConfirmExecuting, setIsConfirmExecuting] = useState<boolean>(false);
+
+  // Per-Office Login History Modal State
+  const [historyOffice, setHistoryOffice] = useState<RegisteredOfficeTelemetry | null>(null);
+  const [officeHistoryLogs, setOfficeHistoryLogs] = useState<any[]>([]);
+  const [isSyncingHistory, setIsSyncingHistory] = useState<boolean>(false);
+  const [historySearch, setHistorySearch] = useState<string>('');
+  const [confirmClearHistory, setConfirmClearHistory] = useState<boolean>(false);
+
+  // Master ID & PIN Settings Form State
+  const [newMasterIdDraft, setNewMasterIdDraft] = useState<string>(() => getMasterUserId());
+  const [currentMasterPinInput, setCurrentMasterPinInput] = useState<string>('');
+  const [newMasterPinInput, setNewMasterPinInput] = useState<string>('');
+  const [confirmMasterPinInput, setConfirmMasterPinInput] = useState<string>('');
+  const [showSettingsPins, setShowSettingsPins] = useState<boolean>(false);
+  const [masterSettingsError, setMasterSettingsError] = useState<string>('');
+  const [masterSettingsSuccess, setMasterSettingsSuccess] = useState<string>('');
+  const [isSavingMasterCreds, setIsSavingMasterCreds] = useState<boolean>(false);
+
+  // Auto-disappear approval/action success banner after 5 seconds
+  useEffect(() => {
+    if (!approvalBanner) return;
+    const timer = setTimeout(() => {
+      setApprovalBanner('');
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [approvalBanner]);
+
+  // Auto-disappear Master Settings success banner after 5 seconds
+  useEffect(() => {
+    if (!masterSettingsSuccess) return;
+    const timer = setTimeout(() => {
+      setMasterSettingsSuccess('');
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [masterSettingsSuccess]);
+
+  const loadMasterData = async (showRefreshAnimation: boolean = false) => {
+    // 1. Immediately hydrate from local cache (0ms)
+    const instantOffices = getRegisteredOfficesLocal();
+    const instantRequests = getPendingOfficeRequestsLocal();
+    setOffices(instantOffices);
+    setOfficeRequests(instantRequests);
+
+    if (showRefreshAnimation) {
+      setIsSyncingBackground(true);
     }
     try {
-      const [officeList, reqList] = await Promise.all([
+      const [officeList, reqList, syncedCreds] = await Promise.all([
         fetchRegisteredOfficesFromMaster(),
         fetchPendingOfficeRequestsFromMaster(),
+        syncMasterCredentialsFromCloud(),
       ]);
       setOffices(officeList);
-      setOfficeRequests(reqList);
+      setOfficeRequests(reqList.filter((r) => r.status !== 'REJECTED'));
+      setCurrentMasterCreds(syncedCreds);
+      setNewMasterIdDraft(syncedCreds.masterUserId);
       if (!didInitialTabSelectRef.current) {
         didInitialTabSelectRef.current = true;
         if (reqList.some((r) => r.status === 'PENDING')) {
@@ -107,18 +203,30 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
         }
       }
     } catch (err) {
-      console.warn('[AppOwnerMasterPortal] Failed to fetch master data:', err);
+      console.warn('[AppOwnerMasterPortal] Background sync notice:', err);
     } finally {
-      setIsLoadingOffices(false);
+      setIsSyncingBackground(false);
     }
   };
 
   useEffect(() => {
+    if (isOpen) {
+      setOffices(getRegisteredOfficesLocal());
+      setOfficeRequests(getPendingOfficeRequestsLocal());
+      syncMasterCredentialsFromCloud()
+        .then((creds) => {
+          setCurrentMasterCreds(creds);
+          setNewMasterIdDraft(creds.masterUserId);
+        })
+        .catch(() => {});
+    }
     if (isOpen && isOwnerAuthenticated) {
-      loadMasterData(true);
+      loadMasterData(false);
     }
     if (!isOpen) {
       didInitialTabSelectRef.current = false;
+      setConfirmAction(null);
+      setHistoryOffice(null);
     }
   }, [isOpen, isOwnerAuthenticated]);
 
@@ -127,13 +235,22 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
       if (!isOpen || !isOwnerAuthenticated) return;
       const customEv = e as CustomEvent<PendingOfficeRegistrationRequest[]>;
       if (Array.isArray(customEv.detail)) {
-        setOfficeRequests(customEv.detail);
+        setOfficeRequests(customEv.detail.filter((r) => r.status !== 'REJECTED'));
       } else {
         setOfficeRequests(getPendingOfficeRequestsLocal());
       }
     };
+    const onCredsUpdate = () => {
+      const creds = getMasterCredentials();
+      setCurrentMasterCreds(creds);
+      setNewMasterIdDraft(creds.masterUserId);
+    };
     window.addEventListener('baf_pending_office_requests_updated', onReqUpdate);
-    return () => window.removeEventListener('baf_pending_office_requests_updated', onReqUpdate);
+    window.addEventListener('baf_master_credentials_updated', onCredsUpdate);
+    return () => {
+      window.removeEventListener('baf_pending_office_requests_updated', onReqUpdate);
+      window.removeEventListener('baf_master_credentials_updated', onCredsUpdate);
+    };
   }, [isOpen, isOwnerAuthenticated]);
 
   if (!isOpen) return null;
@@ -157,20 +274,23 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
 
     setIsLoggingIn(true);
     try {
+      const activeMasterId = getMasterUserId();
       const isValidMasterId =
+        cleanId === activeMasterId ||
+        cleanDigits === activeMasterId ||
         cleanId === MASTER_USER_ID ||
-        cleanDigits === MASTER_USER_ID ||
-        cleanId === '48456' ||
-        cleanDigits === '48456';
+        cleanDigits === MASTER_USER_ID;
 
       const isValidPin =
         isMasterPinMatch(cleanPin) ||
+        cleanPin === currentMasterCreds.masterPin ||
         cleanPin === MASTER_USER_PIN ||
-        cleanPin === '48456' ||
         cleanPin === '1124';
 
       if (isValidMasterId && isValidPin) {
         sessionStorage.setItem('baf_master_owner_authenticated', 'true');
+        setOffices(getRegisteredOfficesLocal());
+        setOfficeRequests(getPendingOfficeRequestsLocal());
         setIsOwnerAuthenticated(true);
       } else if (!isValidMasterId) {
         setAuthError('Invalid Master User ID. Only authorized Master User ID is allowed.');
@@ -192,45 +312,204 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     setMasterPin('');
     setAuthError('');
     setApprovalBanner('');
+    setConfirmAction(null);
+    setHistoryOffice(null);
     signOut(masterAuth).catch(() => {});
     onClose();
   };
 
-  const handleApproveRequest = async (req: PendingOfficeRegistrationRequest) => {
-    setProcessingRequestId(req.id);
-    setApprovalBanner('');
-    try {
+  const executeConfirmedAction = async () => {
+    if (!confirmAction) return;
+    const actionToRun = confirmAction;
+    // Close confirmation modal immediately so the UI never hangs
+    setConfirmAction(null);
+    setIsConfirmExecuting(false);
+
+    if (actionToRun.type === 'APPROVE_REQUEST') {
+      const req = actionToRun.req;
+      setProcessingRequestId(req.id);
       const approved = await approveOfficeRegistrationRequest(req.id);
       if (approved) {
-        const [officeList, reqList] = await Promise.all([
-          fetchRegisteredOfficesFromMaster(),
-          fetchPendingOfficeRequestsFromMaster(),
-        ]);
-        setOffices(officeList);
-        setOfficeRequests(reqList);
+        setOffices(getRegisteredOfficesLocal());
+        setOfficeRequests(getPendingOfficeRequestsLocal());
         setApprovalBanner(
-          `Approved & Created Office "${req.officeName}"! ${req.fullName} (BD/${req.bdNo}) has been added to Biodata Register & User Management (${req.userRole}).`
+          `Approved & Created Office "${req.officeName}"! ${req.fullName} (BD/${req.bdNo}) added to Biodata Register & User Management (${req.userRole}).`
         );
+        // Background cloud refresh
+        fetchRegisteredOfficesFromMaster()
+          .then((list) => setOffices(list))
+          .catch(() => {});
       }
-    } finally {
       setProcessingRequestId(null);
-    }
-  };
-
-  const handleRejectRequest = async (req: PendingOfficeRegistrationRequest) => {
-    setProcessingRequestId(req.id);
-    setApprovalBanner('');
-    try {
+    } else if (actionToRun.type === 'REJECT_REQUEST') {
+      const req = actionToRun.req;
+      // Optimistically remove from state immediately so it disappears at 0ms
+      setOfficeRequests((prev) => prev.filter((item) => item.id !== req.id));
       await rejectOfficeRegistrationRequest(req.id);
-      const reqList = await fetchPendingOfficeRequestsFromMaster();
-      setOfficeRequests(reqList);
-      setApprovalBanner(`Rejected office registration request for "${req.officeName}".`);
-    } finally {
-      setProcessingRequestId(null);
+      setOfficeRequests(getPendingOfficeRequestsLocal());
+      setApprovalBanner(`Rejected & removed registration request for "${req.officeName}".`);
+    } else if (actionToRun.type === 'TOGGLE_OFFICE_STATUS') {
+      const { office, nextStatus } = actionToRun;
+      const code = String(
+        office.officeCode || office.firebaseConfig?.officeCode || office.projectId
+      )
+        .toUpperCase()
+        .trim();
+      setOffices((prev) =>
+        prev.map((item) => {
+          const itemCode = String(
+            item.officeCode || item.firebaseConfig?.officeCode || item.projectId
+          )
+            .toUpperCase()
+            .trim();
+          return itemCode === code ? { ...item, status: nextStatus } : item;
+        })
+      );
+      await toggleRegisteredOfficeStatus(code, nextStatus);
+      setOffices(getRegisteredOfficesLocal());
+      setApprovalBanner(
+        `Office "${office.officeName}" (${code}) has been ${
+          nextStatus === 'DISABLED' ? 'Disabled' : 'Enabled'
+        }.`
+      );
+    } else if (actionToRun.type === 'REMOVE_OFFICE') {
+      const { office } = actionToRun;
+      const code = String(
+        office.officeCode || office.firebaseConfig?.officeCode || office.projectId
+      )
+        .toUpperCase()
+        .trim();
+      // Optimistically remove immediately at 0ms
+      setOffices((prev) =>
+        prev.filter((item) => {
+          const itemCode = String(
+            item.officeCode || item.firebaseConfig?.officeCode || item.projectId
+          )
+            .toUpperCase()
+            .trim();
+          return itemCode !== code;
+        })
+      );
+      await removeRegisteredOffice(code);
+      setOffices(getRegisteredOfficesLocal());
+      setApprovalBanner(`Office "${office.officeName}" (${code}) has been permanently removed.`);
     }
   };
 
-  const handleEnterOfficeAs48456 = async (office: RegisteredOfficeTelemetry) => {
+  const handleOpenOfficeHistory = async (office: RegisteredOfficeTelemetry) => {
+    const code = String(
+      office.officeCode || office.firebaseConfig?.officeCode || office.projectId
+    )
+      .toUpperCase()
+      .trim();
+    setHistoryOffice(office);
+    setHistorySearch('');
+    setConfirmClearHistory(false);
+    // Pre-load local history at 0ms so no loading screen is shown
+    setOfficeHistoryLogs(getOfficeLoginHistoryLocal(code));
+    setIsSyncingHistory(true);
+    try {
+      const logs = await fetchOfficeLoginHistory(code);
+      setOfficeHistoryLogs(logs);
+    } catch {
+      // Keep local logs on error
+    } finally {
+      setIsSyncingHistory(false);
+    }
+  };
+
+  const handleRefreshOfficeHistory = async () => {
+    if (!historyOffice) return;
+    const code = String(
+      historyOffice.officeCode ||
+        historyOffice.firebaseConfig?.officeCode ||
+        historyOffice.projectId
+    )
+      .toUpperCase()
+      .trim();
+    setOfficeHistoryLogs(getOfficeLoginHistoryLocal(code));
+    setIsSyncingHistory(true);
+    try {
+      const logs = await fetchOfficeLoginHistory(code);
+      setOfficeHistoryLogs(logs);
+    } finally {
+      setIsSyncingHistory(false);
+    }
+  };
+
+  const handleClearOfficeHistory = async () => {
+    if (!historyOffice) return;
+    const code = String(
+      historyOffice.officeCode ||
+        historyOffice.firebaseConfig?.officeCode ||
+        historyOffice.projectId
+    )
+      .toUpperCase()
+      .trim();
+    setOfficeHistoryLogs([]);
+    setConfirmClearHistory(false);
+    await clearOfficeLoginHistoryByCode(code);
+    setApprovalBanner(`Cleared login history for "${historyOffice.officeName}".`);
+  };
+
+  const handleSaveMasterCredentials = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMasterSettingsError('');
+    setMasterSettingsSuccess('');
+
+    const cleanNewId = newMasterIdDraft.replace(/^BD\/?/i, '').replace(/\s+/g, '').trim();
+    const cleanCurPin = currentMasterPinInput.trim();
+    const cleanNewPin = newMasterPinInput.trim();
+    const cleanConfirmPin = confirmMasterPinInput.trim();
+
+    if (!cleanNewId) {
+      setMasterSettingsError('Master User ID cannot be empty.');
+      return;
+    }
+    if (!cleanCurPin) {
+      setMasterSettingsError('Please enter your Current Master PIN to confirm changes.');
+      return;
+    }
+    const isCurValid =
+      isMasterPinMatch(cleanCurPin) ||
+      cleanCurPin === currentMasterCreds.masterPin ||
+      cleanCurPin === '1124';
+    if (!isCurValid) {
+      setMasterSettingsError('Current Master PIN is incorrect.');
+      return;
+    }
+
+    const finalPin = cleanNewPin ? cleanNewPin : currentMasterCreds.masterPin;
+    if (cleanNewPin) {
+      if (cleanNewPin.length < 4) {
+        setMasterSettingsError('New Master PIN must be at least 4 characters.');
+        return;
+      }
+      if (cleanNewPin !== cleanConfirmPin) {
+        setMasterSettingsError('New Master PIN and Confirm PIN do not match.');
+        return;
+      }
+    }
+
+    setIsSavingMasterCreds(true);
+    try {
+      const updated = await saveMasterCredentials(cleanNewId, finalPin);
+      setCurrentMasterCreds(updated);
+      setNewMasterIdDraft(updated.masterUserId);
+      setCurrentMasterPinInput('');
+      setNewMasterPinInput('');
+      setConfirmMasterPinInput('');
+      setMasterSettingsSuccess(
+        `Master Credentials updated! Active Master ID: ${updated.masterUserId}`
+      );
+    } catch {
+      setMasterSettingsError('Failed to save Master Credentials.');
+    } finally {
+      setIsSavingMasterCreds(false);
+    }
+  };
+
+  const handleEnterOfficeAsMaster = async (office: RegisteredOfficeTelemetry) => {
     const officeCode = String(
       office.officeCode || office.firebaseConfig?.officeCode || office.projectId
     )
@@ -246,8 +525,12 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
         saveCustomOfficeConfig({
           officeName: office.officeName,
           officeLogo: office.officeLogo || '/155-uasu-baf-logo.png',
-          officeSlogan: office.officeSlogan || office.firebaseConfig?.officeSlogan || 'Intel • Surveillance • Strike',
-          officeBase: office.officeBase || office.firebaseConfig?.officeBase || 'BAF BASE ZHR',
+          officeSlogan:
+            office.officeSlogan ||
+            office.firebaseConfig?.officeSlogan ||
+            'Intel • Surveillance • Strike',
+          officeBase:
+            office.officeBase || office.firebaseConfig?.officeBase || 'BAF BASE ZHR',
           officeCode,
           firebaseConfig: {
             ...office.firebaseConfig,
@@ -258,16 +541,26 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
         updateActiveOfficeProfile({
           officeName: office.officeName,
           officeLogo: office.officeLogo || '/155-uasu-baf-logo.png',
-          officeSlogan: office.officeSlogan || office.firebaseConfig?.officeSlogan || 'Intel • Surveillance • Strike',
-          officeBase: office.officeBase || office.firebaseConfig?.officeBase || 'BAF BASE ZHR',
+          officeSlogan:
+            office.officeSlogan ||
+            office.firebaseConfig?.officeSlogan ||
+            'Intel • Surveillance • Strike',
+          officeBase:
+            office.officeBase || office.firebaseConfig?.officeBase || 'BAF BASE ZHR',
         });
         localDb.switchActiveOfficeWorkspace(false);
       }
 
-      // Ensure 48456 exists in that office's local & Firebase user registry
+      syncBrowserTabIdentity(
+        office.officeName,
+        office.officeLogo || '/155-uasu-baf-logo.png',
+        office.officeBase || 'BAF BASE ZHR'
+      );
+
+      // Ensure Master Owner exists in that office's local & Firebase user registry
       await provisionMasterOwnerInOffice(localDb.getAirmen() || airmen);
 
-      // Set active session as userId: "48456" (role: "master_owner")
+      // Set active session as Master Owner
       loginAsMasterOwnerSession();
 
       // Redirect immediately into that office's dashboard with full admin privileges
@@ -300,17 +593,15 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   };
 
   const totalOffices = offices.length;
-  const totalCombinedUsers = offices.reduce(
-    (sum, item) => sum + (Number(item.totalUsers) || 0),
-    0
-  );
-  const activeOfficesCount = offices.filter((item) => {
-    if (!item.lastActive) return true;
-    const diffMs = Date.now() - new Date(item.lastActive).getTime();
-    return diffMs <= 30 * 24 * 60 * 60 * 1000;
-  }).length;
+  // Total Active Users across all active/registered offices
+  const totalCombinedActiveUsers = offices
+    .filter((item) => item.status !== 'DISABLED')
+    .reduce((sum, item) => sum + (Number(item.totalUsers) || 0), 0);
+  const activeOfficesCount = offices.filter((item) => item.status !== 'DISABLED').length;
 
-  const pendingRequests = officeRequests.filter((r) => r.status === 'PENDING');
+  // Exclude any REJECTED requests so rejected items disappear immediately
+  const visibleRequests = officeRequests.filter((r) => r.status !== 'REJECTED');
+  const pendingRequests = visibleRequests.filter((r) => r.status === 'PENDING');
   const pendingCount = pendingRequests.length;
 
   const filteredOffices = offices.filter((o) => {
@@ -319,14 +610,28 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     return (
       (o.officeName || '').toLowerCase().includes(q) ||
       (o.officeCode || '').toLowerCase().includes(q) ||
+      (o.officeBase || '').toLowerCase().includes(q) ||
       (o.projectId || '').toLowerCase().includes(q)
     );
   });
 
+  const filteredHistoryLogs = officeHistoryLogs.filter((log) => {
+    if (!historySearch.trim()) return true;
+    const q = historySearch.toLowerCase();
+    return (
+      String(log.bdNo || '').toLowerCase().includes(q) ||
+      String(log.name || '').toLowerCase().includes(q) ||
+      String(log.rank || '').toLowerCase().includes(q) ||
+      String(log.flightName || '').toLowerCase().includes(q) ||
+      String(log.role || '').toLowerCase().includes(q) ||
+      String(log.deviceInfo || '').toLowerCase().includes(q)
+    );
+  });
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4 overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-2 sm:p-4 overflow-y-auto">
       {!isOwnerAuthenticated ? (
-        /* SECRET APP OWNER MASTER LOGIN MODAL */
+        /* APP OWNER MASTER LOGIN MODAL */
         <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-2xl space-y-5 text-slate-900 dark:text-white relative animate-fadeIn">
           <button
             type="button"
@@ -337,15 +642,15 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
           </button>
 
           <div className="flex flex-col items-center text-center space-y-2">
-            <div className="w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/40 text-amber-600 dark:text-amber-400 flex items-center justify-center shadow-lg">
+            <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shadow-lg">
               <ShieldAlert className="w-7 h-7" />
             </div>
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-[10px] font-black uppercase tracking-widest">
-              <span>RESTRICTED TELEMETRY ACCESS</span>
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-[10px] font-black uppercase tracking-widest">
+              <span>MASTER COMMAND ACCESS</span>
             </div>
-            <h2 className="text-xl font-black tracking-tight">App Owner Master Login</h2>
+            <h2 className="text-xl font-black tracking-tight">Master Control Center</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Enter your Master User ID & PIN to access the centralized Multi-Office Owner Control Center.
+              Enter your Master User ID & PIN to access the Multi-Office Command & Approval Portal.
             </p>
           </div>
 
@@ -365,14 +670,13 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                 <UserCheck className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
-                  inputMode="numeric"
                   value={masterUserId}
                   onChange={(e) => {
-                    setMasterUserId(e.target.value.replace(/[^0-9]/g, ''));
+                    setMasterUserId(e.target.value);
                     setAuthError('');
                   }}
                   placeholder="Enter Master User ID"
-                  className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                  className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
                   autoFocus
                 />
               </div>
@@ -386,19 +690,18 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                 <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
                   type={showMasterPin ? 'text' : 'password'}
-                  inputMode="numeric"
                   value={masterPin}
                   onChange={(e) => {
                     setMasterPin(e.target.value);
                     setAuthError('');
                   }}
                   placeholder="••••••••"
-                  className="w-full pl-10 pr-10 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                  className="w-full pl-10 pr-10 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
                 />
                 <button
                   type="button"
                   onClick={() => setShowMasterPin(!showMasterPin)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-amber-500 transition-colors cursor-pointer"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-emerald-500 transition-colors cursor-pointer"
                 >
                   {showMasterPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
@@ -408,480 +711,1133 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
             <button
               type="submit"
               disabled={isLoggingIn}
-              className="w-full py-2.5 px-4 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg cursor-pointer transition-colors disabled:opacity-50"
+              className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg cursor-pointer transition-colors disabled:opacity-50"
             >
               {isLoggingIn ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Authenticating Master Owner...</span>
+                  <span>Authenticating...</span>
                 </>
               ) : (
                 <>
                   <LogIn className="w-4 h-4" />
-                  <span>Access Master Control Center</span>
+                  <span>Open Master Control Center</span>
                 </>
               )}
             </button>
           </form>
         </div>
       ) : (
-        /* APP OWNER CONTROL CENTER DASHBOARD */
-        <div className="w-full max-w-5xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl overflow-hidden text-slate-900 dark:text-white flex flex-col max-h-[92vh]">
-          {/* Top Bar */}
-          <div className="px-6 py-4 bg-slate-50 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-600 dark:text-amber-400 flex items-center justify-center">
-                <ShieldAlert className="w-5 h-5" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="text-lg font-black tracking-tight">
-                    App Owner Master Control Center
-                  </h2>
-                  <span className="px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
-                    Master ID: 48456
-                  </span>
+        /* PROFESSIONAL APP-STYLE MASTER CONTROL CENTER (2-COLUMN SIDEBAR + WORKSPACE LAYOUT) */
+        <div className="w-full max-w-6xl h-[90vh] max-h-[860px] bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl overflow-hidden text-slate-900 dark:text-white flex flex-col md:flex-row relative">
+          {/* LEFT COMMAND SIDEBAR (Matches App Sidebar.tsx Aesthetic) */}
+          <aside className="w-full md:w-64 bg-white dark:bg-slate-950 border-b md:border-b-0 md:border-r border-slate-200 dark:border-slate-800 flex flex-col justify-between shrink-0">
+            <div>
+              {/* Brand Header */}
+              <div className="p-4 md:p-5 border-b border-slate-200 dark:border-slate-800/80 flex items-center justify-between md:block">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-emerald-500/20 to-teal-500/10 border border-emerald-500/30 flex items-center justify-center shrink-0 shadow-sm">
+                    <img
+                      src="/155-uasu-baf-logo.png"
+                      alt="Master Control Emblem"
+                      className="w-8 h-8 object-contain"
+                      onError={(e) => {
+                        (e.currentTarget as HTMLImageElement).style.display = 'none';
+                      }}
+                    />
+                  </div>
+                  <div className="min-w-0">
+                    <span className="inline-block px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[9px] font-black uppercase tracking-widest border border-emerald-500/30">
+                      APP OWNER PORTAL
+                    </span>
+                    <h1 className="text-sm font-black tracking-tight text-slate-900 dark:text-white truncate mt-0.5">
+                      Master Control
+                    </h1>
+                    <p className="text-[11px] font-mono font-bold text-slate-500 dark:text-slate-400">
+                      ID: {currentMasterCreds.masterUserId}
+                    </p>
+                  </div>
                 </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Centralized Multi-Office Approval & One-Click Master Office Access
+
+                {/* Mobile quick actions */}
+                <div className="flex items-center gap-1.5 md:hidden">
+                  <button
+                    type="button"
+                    onClick={() => loadMasterData(true)}
+                    className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
+                    title="Sync Now"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${isSyncingBackground ? 'animate-spin' : ''}`} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-500"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Navigation Menu */}
+              <div className="p-3 space-y-1.5 flex md:flex-col overflow-x-auto md:overflow-visible">
+                <p className="hidden md:block px-3 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400 dark:text-slate-500">
+                  Command Navigation
                 </p>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('offices')}
+                  className={`w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    activeTab === 'offices'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Building2 className="w-4 h-4 shrink-0" />
+                    <span>Registered Offices</span>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-black ${
+                      activeTab === 'offices'
+                        ? 'bg-white/20 text-white'
+                        : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                    }`}
+                  >
+                    {totalOffices}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('approvals')}
+                  className={`w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    activeTab === 'approvals'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <ClipboardCheck className="w-4 h-4 shrink-0" />
+                    <span>Approval Requests</span>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-black ${
+                      activeTab === 'approvals'
+                        ? 'bg-white/20 text-white'
+                        : pendingCount > 0
+                        ? 'bg-amber-500 text-white animate-pulse'
+                        : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                    }`}
+                  >
+                    {pendingCount}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('settings');
+                    setMasterSettingsError('');
+                    setMasterSettingsSuccess('');
+                  }}
+                  className={`w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    activeTab === 'settings'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <KeyRound className="w-4 h-4 shrink-0" />
+                    <span>Master ID & PIN</span>
+                  </div>
+                  <ChevronRight className="w-3.5 h-3.5 opacity-60 hidden md:block" />
+                </button>
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => loadMasterData(false)}
-                disabled={isLoadingOffices}
-                className="px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingOffices ? 'animate-spin' : ''}`} />
-                <span>Refresh</span>
-              </button>
+            {/* Sidebar Bottom Footer */}
+            <div className="hidden md:flex flex-col gap-3 p-4 border-t border-slate-200 dark:border-slate-800/80 bg-slate-50/60 dark:bg-slate-900/40">
+              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-1">
+                <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
+                  <span>System Status</span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                    ONLINE
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-400 font-medium">
+                  {activeOfficesCount} Active Workspace{activeOfficesCount === 1 ? '' : 's'} •{' '}
+                  {totalCombinedActiveUsers} Active Users
+                </p>
+              </div>
+
               <button
                 type="button"
                 onClick={handleMasterLogout}
-                className="px-3 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                className="w-full py-2.5 px-3.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/25 text-rose-600 dark:text-rose-400 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors"
               >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Sign Out</span>
-              </button>
-              <button
-                type="button"
-                onClick={onClose}
-                className="p-2 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition-colors"
-              >
-                <X className="w-5 h-5" />
+                <LogOut className="w-4 h-4" />
+                <span>Sign Out Master</span>
               </button>
             </div>
-          </div>
+          </aside>
 
-          {/* Body Content */}
-          <div className="p-6 overflow-y-auto space-y-6">
-            {/* Top Summary Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 flex items-center gap-3.5">
-                <div className="w-11 h-11 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
-                  <Building2 className="w-5 h-5" />
+          {/* RIGHT MAIN WORKSPACE */}
+          <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-slate-50 dark:bg-slate-900">
+            {/* Top Workspace Header (Matches App TopHeader.tsx Aesthetic) */}
+            <header className="px-6 py-4 bg-white dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-base sm:text-lg font-black tracking-tight text-slate-900 dark:text-white">
+                    {activeTab === 'offices'
+                      ? 'Registered Office Workspaces'
+                      : activeTab === 'approvals'
+                      ? 'New Office Approval Queue'
+                      : 'Master Security & Credentials'}
+                  </h2>
+                  <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25">
+                    <ShieldCheck className="w-3 h-3" />
+                    Pre-Loaded Realtime
+                  </span>
                 </div>
-                <div>
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                    Registered Offices
-                  </p>
-                  <p className="text-2xl font-black font-mono tabular-nums text-slate-900 dark:text-white mt-0.5">
-                    {totalOffices}
-                  </p>
-                </div>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  {activeTab === 'offices'
+                    ? 'Inspect, enter, disable/enable, or view login history for any registered office.'
+                    : activeTab === 'approvals'
+                    ? 'Review and approve new office setup requests submitted from the login portal.'
+                    : 'Manage your Master User ID and Master PIN for global workspace access.'}
+                </p>
               </div>
 
-              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 flex items-center gap-3.5">
-                <div className="w-11 h-11 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
-                  <ClipboardCheck className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                    Pending Approvals
-                  </p>
-                  <p className="text-2xl font-black font-mono tabular-nums text-amber-600 dark:text-amber-400 mt-0.5">
-                    {pendingCount}
-                  </p>
-                </div>
-              </div>
-
-              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 flex items-center gap-3.5">
-                <div className="w-11 h-11 rounded-xl bg-sky-500/15 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
-                  <Users className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                    Total Users
-                  </p>
-                  <p className="text-2xl font-black font-mono tabular-nums text-slate-900 dark:text-white mt-0.5">
-                    {totalCombinedUsers}
-                  </p>
-                </div>
-              </div>
-
-              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 flex items-center gap-3.5">
-                <div className="w-11 h-11 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
-                  <Activity className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                    Active Offices
-                  </p>
-                  <p className="text-2xl font-black font-mono tabular-nums text-slate-900 dark:text-white mt-0.5">
-                    {activeOfficesCount}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {approvalBanner && (
-              <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/70 border border-emerald-200 dark:border-emerald-800 flex items-start justify-between gap-3 text-xs text-emerald-800 dark:text-emerald-200">
-                <div className="flex items-start gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
-                  <span className="font-semibold">{approvalBanner}</span>
-                </div>
+              <div className="hidden md:flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setApprovalBanner('')}
-                  className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+                  onClick={() => loadMasterData(true)}
+                  className="px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors border border-slate-200/80 dark:border-slate-700"
+                >
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 text-emerald-500 ${
+                      isSyncingBackground ? 'animate-spin' : ''
+                    }`}
+                  />
+                  <span>Sync Data</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer transition-colors border border-slate-200/80 dark:border-slate-700"
+                  title="Close Master Control Center"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
-            )}
+            </header>
 
-            {/* Mode Tabs: Registered Offices vs New Office Approval Requests */}
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-              <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-800">
-                <button
-                  type="button"
+            {/* Scrollable Workspace Content */}
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5">
+              {/* 4 KPI Summary Cards */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
+                <div
                   onClick={() => setActiveTab('offices')}
-                  className={`px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap flex items-center gap-2 ${
-                    activeTab === 'offices'
-                      ? 'bg-emerald-600 text-white shadow-sm'
-                      : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                  }`}
+                  className="p-4 rounded-2xl bg-white dark:bg-slate-950 border border-slate-200/90 dark:border-slate-800 shadow-sm hover:border-emerald-500/40 transition-all cursor-pointer flex items-center justify-between"
                 >
-                  <Building2 className="w-3.5 h-3.5" />
-                  <span>Registered Offices ({totalOffices})</span>
-                </button>
-                <button
-                  type="button"
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                      Registered Offices
+                    </p>
+                    <p className="text-2xl font-black font-mono tabular-nums text-slate-900 dark:text-white mt-1">
+                      {totalOffices}
+                    </p>
+                    <p className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                      Total Configured Units
+                    </p>
+                  </div>
+                  <div className="w-11 h-11 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                    <Building2 className="w-5 h-5" />
+                  </div>
+                </div>
+
+                <div
                   onClick={() => setActiveTab('approvals')}
-                  className={`px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap flex items-center gap-2 ${
-                    activeTab === 'approvals'
-                      ? 'bg-amber-600 text-white shadow-sm'
-                      : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                  }`}
+                  className="p-4 rounded-2xl bg-white dark:bg-slate-950 border border-slate-200/90 dark:border-slate-800 shadow-sm hover:border-amber-500/40 transition-all cursor-pointer flex items-center justify-between"
                 >
-                  <ClipboardCheck className="w-3.5 h-3.5" />
-                  <span>New Office Approval Requests ({pendingCount})</span>
-                </button>
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                      Pending Approvals
+                    </p>
+                    <p className="text-2xl font-black font-mono tabular-nums text-amber-600 dark:text-amber-400 mt-1">
+                      {pendingCount}
+                    </p>
+                    <p className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 mt-0.5">
+                      Awaiting Master Action
+                    </p>
+                  </div>
+                  <div className="w-11 h-11 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+                    <ClipboardCheck className="w-5 h-5" />
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-white dark:bg-slate-950 border border-slate-200/90 dark:border-slate-800 shadow-sm flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                      Active Users
+                    </p>
+                    <p className="text-2xl font-black font-mono tabular-nums text-sky-600 dark:text-sky-400 mt-1">
+                      {totalCombinedActiveUsers}
+                    </p>
+                    <p className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 mt-0.5">
+                      Active Roster Strength
+                    </p>
+                  </div>
+                  <div className="w-11 h-11 rounded-xl bg-sky-500/10 border border-sky-500/25 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
+                    <Users className="w-5 h-5" />
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-white dark:bg-slate-950 border border-slate-200/90 dark:border-slate-800 shadow-sm flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                      Active Offices
+                    </p>
+                    <p className="text-2xl font-black font-mono tabular-nums text-emerald-600 dark:text-emerald-400 mt-1">
+                      {activeOfficesCount}
+                    </p>
+                    <p className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 mt-0.5">
+                      Enabled & Operational
+                    </p>
+                  </div>
+                  <div className="w-11 h-11 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                    <Activity className="w-5 h-5" />
+                  </div>
+                </div>
               </div>
 
+              {/* Auto-Dismissing Action Feedback Banner (Disappears after 5 seconds) */}
+              {approvalBanner && (
+                <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-800 flex items-center justify-between gap-3 text-xs text-emerald-800 dark:text-emerald-200 shadow-sm animate-fadeIn">
+                  <div className="flex items-center gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                    <span className="font-bold">{approvalBanner}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setApprovalBanner('')}
+                    className="text-emerald-600/70 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-white cursor-pointer p-1"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+
+              {/* TAB 1: REGISTERED OFFICES */}
               {activeTab === 'offices' && (
-                <div className="relative flex-1 max-w-md">
-                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search registered offices by name or code..."
-                    className="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
-                  />
+                <div className="space-y-4">
+                  {/* Search & Filter Bar */}
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-white dark:bg-slate-950 p-3 rounded-xl border border-slate-200 dark:border-slate-800">
+                    <div className="relative flex-1">
+                      <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Search registered office by unit name, base, or office code..."
+                        className="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2 text-[11px] font-bold text-slate-500 dark:text-slate-400 px-2">
+                      <span>Showing {filteredOffices.length} of {totalOffices} Offices</span>
+                    </div>
+                  </div>
+
+                  {/* Offices Grid */}
+                  {filteredOffices.length === 0 ? (
+                    <div className="p-10 rounded-2xl bg-white dark:bg-slate-950 border border-dashed border-slate-300 dark:border-slate-800 text-center space-y-2">
+                      <Building2 className="w-8 h-8 text-slate-400 mx-auto" />
+                      <p className="text-sm font-bold text-slate-700 dark:text-slate-300">
+                        No Matching Offices Found
+                      </p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Try clearing your search filter or approve a new office registration request.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      {filteredOffices.map((office) => {
+                        const code =
+                          office.officeCode ||
+                          office.firebaseConfig?.officeCode ||
+                          office.projectId;
+                        const upperCode = String(code || '').toUpperCase().trim();
+                        const isDefault155 =
+                          upperCode === '155-UASU' || upperCode === '155UASU';
+                        const isDisabled = office.status === 'DISABLED';
+                        const cardKey = `${office.projectId}_${code}`;
+                        const isCopied = copiedProjectId === cardKey;
+                        const isEntering = enteringProjectId === cardKey;
+                        const logoUrl = office.officeLogo || '/155-uasu-baf-logo.png';
+                        const baseName =
+                          office.officeBase ||
+                          office.firebaseConfig?.officeBase ||
+                          'BAF BASE ZHR';
+                        const sloganText =
+                          office.officeSlogan ||
+                          office.firebaseConfig?.officeSlogan ||
+                          'Intel • Surveillance • Strike';
+
+                        return (
+                          <div
+                            key={cardKey}
+                            className={`rounded-2xl border transition-all flex flex-col justify-between p-5 shadow-sm ${
+                              isDisabled
+                                ? 'bg-slate-100/70 dark:bg-slate-950/50 border-rose-500/30 opacity-85'
+                                : 'bg-white dark:bg-slate-950 border-slate-200/90 dark:border-slate-800 hover:border-emerald-500/40'
+                            }`}
+                          >
+                            <div>
+                              {/* Card Top Row */}
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex items-center gap-3.5 min-w-0">
+                                  <div className="w-12 h-12 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center justify-center overflow-hidden shrink-0 p-1.5">
+                                    <img
+                                      src={logoUrl}
+                                      alt={office.officeName}
+                                      className="w-full h-full object-contain"
+                                      onError={(e) => {
+                                        (e.currentTarget as HTMLImageElement).src =
+                                          '/155-uasu-baf-logo.png';
+                                      }}
+                                    />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <h3 className="text-base font-black text-slate-900 dark:text-white truncate">
+                                        {office.officeName}
+                                      </h3>
+                                      {isDefault155 && (
+                                        <span className="px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider bg-sky-500/15 text-sky-600 dark:text-sky-400 border border-sky-500/30">
+                                          Primary HQ
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-500 dark:text-slate-400 mt-0.5">
+                                      <span className="inline-flex items-center gap-1">
+                                        <MapPin className="w-3 h-3 text-emerald-500" />
+                                        {baseName}
+                                      </span>
+                                      <span>•</span>
+                                      <span className="truncate">{sloganText}</span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <span
+                                  className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wider shrink-0 border ${
+                                    isDisabled
+                                      ? 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30'
+                                      : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                                  }`}
+                                >
+                                  {isDisabled ? 'DISABLED' : 'ACTIVE'}
+                                </span>
+                              </div>
+
+                              {/* Metrics Bar */}
+                              <div className="mt-4 grid grid-cols-3 gap-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200/70 dark:border-slate-800/80 text-xs">
+                                <div>
+                                  <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                                    Office Code
+                                  </p>
+                                  <p className="font-mono font-bold text-emerald-600 dark:text-emerald-400 truncate mt-0.5">
+                                    {code}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                                    Active Users
+                                  </p>
+                                  <p className="font-mono font-black text-slate-900 dark:text-white mt-0.5 flex items-center gap-1">
+                                    <Users className="w-3.5 h-3.5 text-sky-500" />
+                                    <span>{Number(office.totalUsers) || 0}</span>
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                                    Last Synced
+                                  </p>
+                                  <p className="text-[11px] font-semibold text-slate-600 dark:text-slate-300 truncate mt-0.5">
+                                    {office.lastActiveAt
+                                      ? new Date(office.lastActiveAt).toLocaleDateString()
+                                      : 'Active'}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Action Buttons */}
+                            <div className="mt-4 pt-3 border-t border-slate-200/80 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenOfficeHistory(office)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-900 hover:bg-indigo-500/15 text-slate-700 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 border border-slate-200 dark:border-slate-800 text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                                  title="View Office Login History"
+                                >
+                                  <History className="w-3.5 h-3.5 text-indigo-500" />
+                                  <span>History</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopyInviteLink(office)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                                  title="Copy Office Code"
+                                >
+                                  {isCopied ? (
+                                    <>
+                                      <Check className="w-3.5 h-3.5 text-emerald-500" />
+                                      <span className="text-emerald-600 dark:text-emerald-400">
+                                        Copied
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="w-3.5 h-3.5 text-slate-400" />
+                                      <span>Copy Code</span>
+                                    </>
+                                  )}
+                                </button>
+
+                                {!isDefault155 && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setConfirmAction({
+                                          type: 'TOGGLE_OFFICE_STATUS',
+                                          office,
+                                          nextStatus: isDisabled ? 'ACTIVE' : 'DISABLED',
+                                        })
+                                      }
+                                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors border ${
+                                        isDisabled
+                                          ? 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                                          : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                                      }`}
+                                    >
+                                      {isDisabled ? (
+                                        <>
+                                          <Power className="w-3.5 h-3.5" />
+                                          <span>Enable</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Ban className="w-3.5 h-3.5" />
+                                          <span>Disable</span>
+                                        </>
+                                      )}
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setConfirmAction({
+                                          type: 'REMOVE_OFFICE',
+                                          office,
+                                        })
+                                      }
+                                      className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/30 cursor-pointer transition-colors"
+                                      title="Permanently Remove Office"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => handleEnterOfficeAsMaster(office)}
+                                disabled={isEntering}
+                                className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1.5 shadow-sm cursor-pointer transition-colors disabled:opacity-50"
+                              >
+                                {isEntering ? (
+                                  <>
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    <span>Opening...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <ExternalLink className="w-3.5 h-3.5" />
+                                    <span>Enter Office</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* TAB 2: NEW OFFICE APPROVAL REQUESTS */}
+              {activeTab === 'approvals' && (
+                <div className="space-y-4">
+                  {visibleRequests.length === 0 ? (
+                    <div className="p-12 rounded-2xl bg-white dark:bg-slate-950 border border-dashed border-slate-300 dark:border-slate-800 text-center space-y-2">
+                      <ClipboardCheck className="w-9 h-9 text-slate-400 mx-auto" />
+                      <p className="text-sm font-bold text-slate-700 dark:text-slate-300">
+                        No Pending Office Registration Requests
+                      </p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+                        When a user submits the 3-step "Register a New Office" form on the Login Portal, their request will appear here immediately.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-4">
+                      {visibleRequests.map((req) => {
+                        const isProcessing = processingRequestId === req.id;
+                        const isApproved = req.status === 'APPROVED';
+
+                        return (
+                          <div
+                            key={req.id}
+                            className={`p-5 rounded-2xl border transition-all space-y-4 shadow-sm ${
+                              isApproved
+                                ? 'bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-500/30'
+                                : 'bg-white dark:bg-slate-950 border-amber-500/40'
+                            }`}
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                              <div className="flex items-start gap-3.5">
+                                <div className="w-12 h-12 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center justify-center overflow-hidden shrink-0 p-1.5">
+                                  <img
+                                    src={req.officeLogo || '/155-uasu-baf-logo.png'}
+                                    alt={req.officeName}
+                                    className="w-full h-full object-contain"
+                                    onError={(e) => {
+                                      (e.currentTarget as HTMLImageElement).src =
+                                        '/155-uasu-baf-logo.png';
+                                    }}
+                                  />
+                                </div>
+                                <div>
+                                  <div className="flex items-center flex-wrap gap-2">
+                                    <h3 className="text-base font-black text-slate-900 dark:text-white">
+                                      {req.officeName}
+                                    </h3>
+                                    <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-800">
+                                      Code: {req.officeCode}
+                                    </span>
+                                  </div>
+                                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                                    {req.officeBase} • {req.officeSlogan}
+                                  </p>
+                                  <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
+                                    Submitted: {new Date(req.createdAt).toLocaleString()}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2 self-end sm:self-center">
+                                {req.status === 'PENDING' ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={isProcessing}
+                                      onClick={() =>
+                                        setConfirmAction({
+                                          type: 'REJECT_REQUEST',
+                                          req,
+                                        })
+                                      }
+                                      className="px-3.5 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/30 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                      <span>Reject</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isProcessing}
+                                      onClick={() =>
+                                        setConfirmAction({
+                                          type: 'APPROVE_REQUEST',
+                                          req,
+                                        })
+                                      }
+                                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md cursor-pointer transition-colors disabled:opacity-50"
+                                    >
+                                      {isProcessing ? (
+                                        <>
+                                          <Loader2 className="w-4 h-4 animate-spin" />
+                                          <span>Approving...</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <CheckCircle2 className="w-4 h-4" />
+                                          <span>Approve & Create Office</span>
+                                        </>
+                                      )}
+                                    </button>
+                                  </>
+                                ) : (
+                                  <span className="px-3 py-1.5 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 text-xs font-black uppercase tracking-wider flex items-center gap-1.5">
+                                    <CheckCircle2 className="w-4 h-4" />
+                                    <span>APPROVED</span>
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Step 2 Requester User Info Grid */}
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-800 text-xs">
+                              <div>
+                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                                  User ID (BD No)
+                                </p>
+                                <p className="font-mono font-black text-emerald-600 dark:text-emerald-400 mt-0.5">
+                                  BD/{req.bdNo}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                                  Full Name
+                                </p>
+                                <p className="font-bold text-slate-900 dark:text-white mt-0.5 truncate">
+                                  {req.fullName}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                                  Surname
+                                </p>
+                                <p className="font-bold text-slate-800 dark:text-slate-200 mt-0.5 truncate">
+                                  {req.surname}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                                  Trade
+                                </p>
+                                <p className="font-semibold text-slate-700 dark:text-slate-300 mt-0.5 flex items-center gap-1">
+                                  <Briefcase className="w-3 h-3 text-slate-400 shrink-0" />
+                                  <span className="truncate">{req.trade}</span>
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                                  User Role
+                                </p>
+                                <p className="font-black text-amber-600 dark:text-amber-400 mt-0.5">
+                                  {req.userRole === 'SUPER_ADMIN'
+                                    ? 'Super Admin'
+                                    : req.userRole === 'ADMIN'
+                                    ? 'Admin'
+                                    : 'User'}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                                  Contact No
+                                </p>
+                                <p className="font-mono font-semibold text-slate-700 dark:text-slate-300 mt-0.5 flex items-center gap-1">
+                                  <Phone className="w-3 h-3 text-slate-400 shrink-0" />
+                                  <span>{req.contactNo || 'N/A'}</span>
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* TAB 3: MASTER ID & PIN CONFIGURATION */}
+              {activeTab === 'settings' && (
+                <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 max-w-2xl space-y-5 shadow-sm">
+                  <div className="flex items-start gap-3.5 border-b border-slate-200 dark:border-slate-800 pb-4">
+                    <div className="w-11 h-11 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                      <KeyRound className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-black text-slate-900 dark:text-white">
+                        Master User ID & PIN Configuration
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                        Update the Master User ID and Master PIN used for multi-office login and Master Control Center access.
+                      </p>
+                    </div>
+                  </div>
+
+                  {masterSettingsError && (
+                    <div className="p-3 bg-red-50 dark:bg-red-950/70 border border-red-200 dark:border-red-800 rounded-xl flex items-center gap-2 text-xs font-bold text-red-700 dark:text-red-200">
+                      <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+                      <span>{masterSettingsError}</span>
+                    </div>
+                  )}
+
+                  {masterSettingsSuccess && (
+                    <div className="p-3 bg-emerald-50 dark:bg-emerald-950/70 border border-emerald-200 dark:border-emerald-800 rounded-xl flex items-center justify-between gap-2 text-xs font-bold text-emerald-700 dark:text-emerald-200">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                        <span>{masterSettingsSuccess}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setMasterSettingsSuccess('')}
+                        className="text-emerald-600 hover:text-emerald-800 dark:text-emerald-300 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSaveMasterCredentials} className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                          Master User ID (BD No)
+                        </label>
+                        <div className="relative">
+                          <UserCheck className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            value={newMasterIdDraft}
+                            onChange={(e) => {
+                              setNewMasterIdDraft(e.target.value);
+                              setMasterSettingsError('');
+                            }}
+                            placeholder="e.g. 48456"
+                            className="w-full pl-10 pr-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                          Current Master PIN <span className="text-rose-500">*</span>
+                        </label>
+                        <div className="relative">
+                          <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            type={showSettingsPins ? 'text' : 'password'}
+                            value={currentMasterPinInput}
+                            onChange={(e) => {
+                              setCurrentMasterPinInput(e.target.value);
+                              setMasterSettingsError('');
+                            }}
+                            placeholder="Enter Current Master PIN"
+                            className="w-full pl-10 pr-10 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowSettingsPins(!showSettingsPins)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-emerald-500 cursor-pointer"
+                          >
+                            {showSettingsPins ? (
+                              <EyeOff className="w-4 h-4" />
+                            ) : (
+                              <Eye className="w-4 h-4" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                          New Master PIN
+                        </label>
+                        <input
+                          type={showSettingsPins ? 'text' : 'password'}
+                          value={newMasterPinInput}
+                          onChange={(e) => {
+                            setNewMasterPinInput(e.target.value);
+                            setMasterSettingsError('');
+                          }}
+                          placeholder="Leave blank to keep current PIN"
+                          className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                          Confirm New Master PIN
+                        </label>
+                        <input
+                          type={showSettingsPins ? 'text' : 'password'}
+                          value={confirmMasterPinInput}
+                          onChange={(e) => {
+                            setConfirmMasterPinInput(e.target.value);
+                            setMasterSettingsError('');
+                          }}
+                          placeholder="Confirm New Master PIN"
+                          className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="pt-2 flex justify-end">
+                      <button
+                        type="submit"
+                        disabled={isSavingMasterCreds}
+                        className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-2 shadow-md cursor-pointer transition-colors disabled:opacity-50"
+                      >
+                        {isSavingMasterCreds ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Save className="w-4 h-4" />
+                        )}
+                        <span>Save Master ID & PIN</span>
+                      </button>
+                    </div>
+                  </form>
                 </div>
               )}
             </div>
-
-            {activeTab === 'approvals' ? (
-              /* NEW OFFICE REGISTRATION APPROVAL REQUESTS */
-              <div className="space-y-4">
-                {officeRequests.length === 0 ? (
-                  <div className="p-10 rounded-2xl border border-dashed border-slate-300 dark:border-slate-800 text-center space-y-2">
-                    <ClipboardCheck className="w-8 h-8 text-slate-400 mx-auto" />
-                    <p className="text-sm font-bold text-slate-700 dark:text-slate-300">
-                      No New Office Registration Requests
-                    </p>
-                    <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
-                      When a user submits the 3-step "Register a New Office" form on the Login Portal, their request will appear here for your approval.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 gap-4">
-                    {officeRequests.map((req) => {
-                      const isProcessing = processingRequestId === req.id;
-                      const isPending = req.status === 'PENDING';
-                      const isApproved = req.status === 'APPROVED';
-                      return (
-                        <div
-                          key={req.id}
-                          className={`p-5 rounded-2xl border transition-all flex flex-col gap-4 ${
-                            isPending
-                              ? 'bg-amber-500/5 dark:bg-slate-800/70 border-amber-500/40'
-                              : isApproved
-                              ? 'bg-emerald-500/5 dark:bg-slate-800/40 border-emerald-500/30'
-                              : 'bg-slate-50 dark:bg-slate-800/30 border-slate-200 dark:border-slate-800 opacity-75'
-                          }`}
-                        >
-                          <div className="flex flex-wrap items-start justify-between gap-4">
-                            {/* Office Info */}
-                            <div className="flex items-start gap-3.5">
-                              <img
-                                src={req.officeLogo || '/155-uasu-baf-logo.png'}
-                                alt={req.officeName}
-                                onError={(e) => {
-                                  (e.target as HTMLImageElement).src = '/155-uasu-baf-logo.png';
-                                }}
-                                className="w-14 h-14 rounded-xl object-contain bg-white dark:bg-slate-900 p-1.5 border border-slate-200 dark:border-slate-700 shrink-0"
-                              />
-                              <div>
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <h3 className="text-base font-black text-slate-900 dark:text-white uppercase">
-                                    {req.officeName}
-                                  </h3>
-                                  <span className="text-xs font-mono text-slate-500 dark:text-slate-400">
-                                    · Code: {req.officeCode}{req.wing ? ` · ${req.wing}` : ''}
-                                  </span>
-                                </div>
-                                <p className="text-xs font-semibold text-slate-600 dark:text-slate-300 mt-0.5">
-                                  {req.officeBase} · {req.officeSlogan}
-                                </p>
-                                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
-                                  Requested: {new Date(req.createdAt).toLocaleString()}
-                                </p>
-                              </div>
-                            </div>
-
-                            {/* Status Text */}
-                            <div className="text-xs font-black uppercase tracking-wider">
-                              {isPending && (
-                                <span className="text-amber-600 dark:text-amber-400">
-                                  Pending Master Approval
-                                </span>
-                              )}
-                              {isApproved && (
-                                <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
-                                  <CheckCircle2 className="w-4 h-4" />
-                                  <span>Approved & Created</span>
-                                </span>
-                              )}
-                              {req.status === 'REJECTED' && (
-                                <span className="text-red-600 dark:text-red-400 flex items-center gap-1">
-                                  <XCircle className="w-4 h-4" />
-                                  <span>Rejected</span>
-                                </span>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Step 2 User Information Box */}
-                          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2.5 p-3.5 rounded-xl bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 text-left">
-                            <div>
-                              <div className="text-[10px] font-bold uppercase text-slate-400">
-                                User ID (BD No)
-                              </div>
-                              <div className="text-xs font-mono font-black text-emerald-600 dark:text-emerald-400 mt-0.5">
-                                BD/{req.bdNo}
-                              </div>
-                            </div>
-                            <div>
-                              <div className="text-[10px] font-bold uppercase text-slate-400">
-                                Full Name
-                              </div>
-                              <div className="text-xs font-bold text-slate-900 dark:text-white mt-0.5 truncate">
-                                {req.fullName}
-                              </div>
-                            </div>
-                            <div>
-                              <div className="text-[10px] font-bold uppercase text-slate-400">
-                                Surname
-                              </div>
-                              <div className="text-xs font-bold text-slate-900 dark:text-white mt-0.5 truncate">
-                                {req.surname}
-                              </div>
-                            </div>
-                            <div>
-                              <div className="text-[10px] font-bold uppercase text-slate-400">
-                                Trade
-                              </div>
-                              <div className="text-xs font-semibold text-slate-700 dark:text-slate-300 mt-0.5 truncate flex items-center gap-1">
-                                <Briefcase className="w-3 h-3 text-slate-400 shrink-0" />
-                                <span>{req.trade}</span>
-                              </div>
-                            </div>
-                            <div>
-                              <div className="text-[10px] font-bold uppercase text-slate-400">
-                                User Role
-                              </div>
-                              <div className="text-xs font-black text-amber-600 dark:text-amber-400 mt-0.5">
-                                {req.userRole === 'SUPER_ADMIN'
-                                  ? 'Super Admin'
-                                  : req.userRole === 'ADMIN'
-                                  ? 'Admin'
-                                  : req.userRole === 'USER'
-                                  ? 'User'
-                                  : req.userRole}
-                              </div>
-                            </div>
-                            <div>
-                              <div className="text-[10px] font-bold uppercase text-slate-400">
-                                Contact No
-                              </div>
-                              <div className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 mt-0.5 flex items-center gap-1">
-                                <Phone className="w-3 h-3 text-slate-400 shrink-0" />
-                                <span>{req.contactNo || 'N/A'}</span>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Action Buttons */}
-                          <div className="flex flex-wrap items-center justify-end gap-2.5 pt-1">
-                            {req.status !== 'APPROVED' && (
-                              <button
-                                type="button"
-                                onClick={() => handleApproveRequest(req)}
-                                disabled={isProcessing}
-                                className="py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-2 shadow-md cursor-pointer transition-colors disabled:opacity-50"
-                              >
-                                {isProcessing ? (
-                                  <Loader2 className="w-4 h-4 animate-spin" />
-                                ) : (
-                                  <CheckCircle2 className="w-4 h-4" />
-                                )}
-                                <span>Approve & Create Office</span>
-                              </button>
-                            )}
-                            {req.status === 'PENDING' && (
-                              <button
-                                type="button"
-                                onClick={() => handleRejectRequest(req)}
-                                disabled={isProcessing}
-                                className="py-2.5 px-4 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-600 dark:text-red-400 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
-                              >
-                                <XCircle className="w-4 h-4" />
-                                <span>Reject</span>
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            ) : isLoadingOffices ? (
-              <div className="py-12 flex flex-col items-center justify-center gap-2 text-slate-500">
-                <Loader2 className="w-7 h-7 animate-spin text-emerald-500" />
-                <span className="text-xs font-bold">Loading registered offices...</span>
-              </div>
-            ) : filteredOffices.length === 0 ? (
-              <div className="p-10 rounded-2xl border border-dashed border-slate-300 dark:border-slate-800 text-center space-y-2">
-                <Database className="w-8 h-8 text-slate-400 mx-auto" />
-                <p className="text-sm font-bold text-slate-700 dark:text-slate-300">
-                  No Registered Offices Found
-                </p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {filteredOffices.map((office) => {
-                  const officeCode =
-                    office.officeCode || office.firebaseConfig?.officeCode || office.projectId;
-                  const key = `${office.projectId}_${officeCode}`;
-                  const isCopied = copiedProjectId === key;
-                  const isEntering = enteringProjectId === key;
-                  return (
-                    <div
-                      key={key}
-                      className="p-4 rounded-2xl bg-slate-50/80 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 hover:border-emerald-500/40 transition-all flex flex-col justify-between gap-4 shadow-sm"
-                    >
-                      <div className="flex items-start gap-3.5">
-                        <img
-                          src={office.officeLogo || '/155-uasu-baf-logo.png'}
-                          alt={office.officeName}
-                          onError={(e) => {
-                            (e.target as HTMLImageElement).src = '/155-uasu-baf-logo.png';
-                          }}
-                          className="w-12 h-12 rounded-xl object-contain bg-white dark:bg-slate-900 p-1.5 border border-slate-200 dark:border-slate-700 shrink-0"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between gap-2">
-                            <h3 className="text-sm font-black text-slate-900 dark:text-white truncate">
-                              {office.officeName}
-                            </h3>
-                            <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400 shrink-0">
-                              {office.totalUsers || 0} Users
-                            </span>
-                          </div>
-
-                          <div className="mt-1 flex items-center gap-1.5 text-xs font-mono text-slate-500 dark:text-slate-400 truncate">
-                            <Database className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                            <span className="truncate">
-                              Code: <strong className="text-emerald-600 dark:text-emerald-400">{officeCode}</strong>
-                              {office.joinPin || office.firebaseConfig?.joinPin
-                                ? ` · PIN: ${office.joinPin || office.firebaseConfig?.joinPin}`
-                                : ''}
-                            </span>
-                          </div>
-
-                          <div className="mt-1 flex items-center gap-1.5 text-[11px] text-slate-400 dark:text-slate-500">
-                            <Clock className="w-3 h-3 shrink-0" />
-                            <span>
-                              Last Active:{' '}
-                              {office.lastActive
-                                ? new Date(office.lastActive).toLocaleString()
-                                : 'Just now'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-200/70 dark:border-slate-800">
-                        <button
-                          type="button"
-                          onClick={() => handleEnterOfficeAs48456(office)}
-                          disabled={isEntering}
-                          className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-md cursor-pointer transition-colors disabled:opacity-50"
-                        >
-                          {isEntering ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <ExternalLink className="w-3.5 h-3.5" />
-                          )}
-                          <span>Enter Office (Login as 48456)</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => handleCopyInviteLink(office)}
-                          className="py-2 px-3 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
-                        >
-                          {isCopied ? (
-                            <>
-                              <Check className="w-3.5 h-3.5 text-emerald-500" />
-                              <span className="text-emerald-600 dark:text-emerald-400">
-                                Copied!
-                              </span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3.5 h-3.5" />
-                              <span>Copy Office Code</span>
-                            </>
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
           </div>
+
+          {/* CONFIRMATION POPUP MODAL FOR APPROVE / REJECT / DISABLE / REMOVE */}
+          {confirmAction && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 backdrop-blur-sm p-4 animate-fadeIn">
+              <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-2xl space-y-5 text-slate-900 dark:text-white">
+                <div className="flex items-start gap-3.5">
+                  <div
+                    className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border ${
+                      confirmAction.type === 'APPROVE_REQUEST' ||
+                      (confirmAction.type === 'TOGGLE_OFFICE_STATUS' &&
+                        confirmAction.nextStatus === 'ACTIVE')
+                        ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-500'
+                        : confirmAction.type === 'TOGGLE_OFFICE_STATUS'
+                        ? 'bg-amber-500/15 border-amber-500/30 text-amber-500'
+                        : 'bg-rose-500/15 border-rose-500/30 text-rose-500'
+                    }`}
+                  >
+                    {confirmAction.type === 'APPROVE_REQUEST' ? (
+                      <CheckCircle2 className="w-6 h-6" />
+                    ) : (
+                      <AlertCircle className="w-6 h-6" />
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-base font-black">
+                      {confirmAction.type === 'APPROVE_REQUEST' &&
+                        'Approve & Create New Office?'}
+                      {confirmAction.type === 'REJECT_REQUEST' &&
+                        'Reject & Remove Office Request?'}
+                      {confirmAction.type === 'TOGGLE_OFFICE_STATUS' &&
+                        `${
+                          confirmAction.nextStatus === 'DISABLED' ? 'Disable' : 'Enable'
+                        } Office Workspace?`}
+                      {confirmAction.type === 'REMOVE_OFFICE' && 'Remove Registered Office?'}
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                      {confirmAction.type === 'APPROVE_REQUEST' &&
+                        `Approve "${confirmAction.req.officeName}" (${confirmAction.req.officeCode}) and provision ${confirmAction.req.fullName} (BD/${confirmAction.req.bdNo}) in Biodata Register & User Management?`}
+                      {confirmAction.type === 'REJECT_REQUEST' &&
+                        `Are you sure you want to reject the registration request for "${confirmAction.req.officeName}" by BD/${confirmAction.req.bdNo}? Once rejected, this request will immediately disappear.`}
+                      {confirmAction.type === 'TOGGLE_OFFICE_STATUS' &&
+                        `Are you sure you want to ${
+                          confirmAction.nextStatus === 'DISABLED' ? 'disable' : 're-enable'
+                        } "${confirmAction.office.officeName}"?`}
+                      {confirmAction.type === 'REMOVE_OFFICE' &&
+                        `Are you sure you want to permanently remove "${confirmAction.office.officeName}"? Its registered office record and user directory mapping will be removed immediately.`}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-2">
+                  <button
+                    type="button"
+                    disabled={isConfirmExecuting}
+                    onClick={() => setConfirmAction(null)}
+                    className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-bold text-slate-700 dark:text-slate-300 cursor-pointer transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isConfirmExecuting}
+                    onClick={executeConfirmedAction}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center gap-1.5 shadow-md cursor-pointer transition-colors ${
+                      confirmAction.type === 'APPROVE_REQUEST' ||
+                      (confirmAction.type === 'TOGGLE_OFFICE_STATUS' &&
+                        confirmAction.nextStatus === 'ACTIVE')
+                        ? 'bg-emerald-600 hover:bg-emerald-500'
+                        : confirmAction.type === 'TOGGLE_OFFICE_STATUS'
+                        ? 'bg-amber-600 hover:bg-amber-500'
+                        : 'bg-rose-600 hover:bg-rose-500'
+                    }`}
+                  >
+                    <span>
+                      {confirmAction.type === 'APPROVE_REQUEST' && 'Yes, Approve & Create'}
+                      {confirmAction.type === 'REJECT_REQUEST' && 'Yes, Reject Request'}
+                      {confirmAction.type === 'TOGGLE_OFFICE_STATUS' &&
+                        `Yes, ${
+                          confirmAction.nextStatus === 'DISABLED' ? 'Disable' : 'Enable'
+                        }`}
+                      {confirmAction.type === 'REMOVE_OFFICE' && 'Yes, Remove Office'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* PER-OFFICE LOGIN HISTORY MODAL (PRE-LOADED AT 0ms) */}
+          {historyOffice && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-fadeIn">
+              <div className="w-full max-w-4xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh] text-slate-900 dark:text-white">
+                <div className="px-6 py-4 bg-slate-50 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+                      <History className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-black">
+                        {historyOffice.officeName} — Login History
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Office Code:{' '}
+                        {historyOffice.officeCode ||
+                          historyOffice.firebaseConfig?.officeCode ||
+                          historyOffice.projectId}{' '}
+                        • {officeHistoryLogs.length} Recorded Sessions
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleRefreshOfficeHistory}
+                      className="px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${isSyncingHistory ? 'animate-spin' : ''}`}
+                      />
+                      <span>Sync</span>
+                    </button>
+                    {officeHistoryLogs.length > 0 &&
+                      (!confirmClearHistory ? (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmClearHistory(true)}
+                          className="px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/30 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Clear</span>
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={handleClearOfficeHistory}
+                            className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold cursor-pointer"
+                          >
+                            Confirm Clear
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmClearHistory(false)}
+                            className="px-2 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-[11px] font-bold cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ))}
+                    <button
+                      type="button"
+                      onClick={() => setHistoryOffice(null)}
+                      className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50">
+                  <div className="relative max-w-md">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={historySearch}
+                      onChange={(e) => setHistorySearch(e.target.value)}
+                      placeholder="Filter by BD No, Name, Rank, Role, or Device..."
+                      className="w-full pl-10 pr-4 py-2 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-4 overflow-y-auto flex-1">
+                  {filteredHistoryLogs.length === 0 ? (
+                    <div className="p-10 text-center space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-2xl">
+                      <History className="w-7 h-7 text-slate-400 mx-auto" />
+                      <p className="text-sm font-bold text-slate-700 dark:text-slate-300">
+                        No Login History Found for {historyOffice.officeName}
+                      </p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        When users sign in to this office, their timestamped login records will appear here.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-100 dark:bg-slate-950 text-slate-500 dark:text-slate-400 uppercase text-[10px] font-black tracking-wider border-b border-slate-200 dark:border-slate-800">
+                            <th className="py-2.5 px-3">Login Time</th>
+                            <th className="py-2.5 px-3">BD No</th>
+                            <th className="py-2.5 px-3">Rank & Name</th>
+                            <th className="py-2.5 px-3">Flight / Trade</th>
+                            <th className="py-2.5 px-3">Role</th>
+                            <th className="py-2.5 px-3">Device / Browser</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                          {filteredHistoryLogs.map((log, idx) => (
+                            <tr
+                              key={log.id || idx}
+                              className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
+                            >
+                              <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                                {log.loginAt
+                                  ? new Date(log.loginAt).toLocaleString()
+                                  : 'Unknown'}
+                              </td>
+                              <td className="py-2.5 px-3 font-mono font-bold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                                {log.bdNo || '-'}
+                              </td>
+                              <td className="py-2.5 px-3 font-bold text-slate-900 dark:text-white whitespace-nowrap">
+                                {log.rank ? `${log.rank} ` : ''}
+                                {log.name || '-'}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                                {log.flightName || log.trade || '-'}
+                              </td>
+                              <td className="py-2.5 px-3 whitespace-nowrap">
+                                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20">
+                                  {log.role || 'user'}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-[11px] text-slate-500 dark:text-slate-400">
+                                {log.deviceInfo || 'Web Browser'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 };
-

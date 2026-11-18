@@ -45,13 +45,16 @@ import { GoogleDriveBackupModal } from './GoogleDriveBackupModal';
 import { UserRole, DetailedUserLogin, UserLoginStatus, UserLoginRole, Rank, FlightName } from '../types';
 import { getCustomDuties, saveCustomDuties, addCustomDuty, removeCustomDuty, CustomDutyConfig } from '../utils/customDuties';
 import { subscribeToActiveUsers, subscribeToLoginHistory, refreshLoginHistoryFromCloud } from '../services/presenceService';
-import { getLoginHistory, clearLoginHistory, recordLoginLog, UserLoginLog, getDetailedUsers, toggleUserLoginStatus, saveDetailedUsers, changeUserPassword, changeAdminPassword, changeUserRole, getCurrentUserSession } from '../utils/authSession';
+import { getLoginHistory, clearLoginHistory, recordLoginLog, UserLoginLog, getDetailedUsers, toggleUserLoginStatus, saveDetailedUsers, changeUserPassword, changeAdminPassword, changeUserRole, getCurrentUserSession, isMasterPinMatch } from '../utils/authSession';
 import { localDb, getSyncLogs, SyncLog } from '../services/localDatabase';
 import {
   encodeOfficeSetupLink,
   getActiveOfficeIdentity,
   updateActiveOfficeProfile,
   OFFICE_PROFILE_STORAGE_KEY,
+  getMasterCredentials,
+  getMasterUserId,
+  saveMasterCredentials,
 } from '../firebase';
 
 import { CustomDutiesTab } from './CustomDutiesTab';
@@ -220,7 +223,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     if (onRosterUpdated) {
       onRosterUpdated();
     }
-    setTimeout(() => setProfileSavedMsg(''), 4000);
+    setTimeout(() => setProfileSavedMsg(''), 5000);
   };
 
   // Security Tab State
@@ -449,9 +452,72 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   // Database Backup State
   const [restoreStatus, setRestoreStatus] = useState<string>('');
   const [isBackingUp, setIsBackingUp] = useState<boolean>(false);
-  const [editingPasswordType, setEditingPasswordType] = useState<'portal' | 'admin' | null>(null);
+  const [editingPasswordType, setEditingPasswordType] = useState<'portal' | 'admin' | 'master' | null>(null);
+  const [masterIdDraft, setMasterIdDraft] = useState<string>(() => getMasterUserId());
+  const [masterCurrentPin, setMasterCurrentPin] = useState<string>('');
+  const [masterNewPin, setMasterNewPin] = useState<string>('');
+  const [masterConfirmPin, setMasterConfirmPin] = useState<string>('');
+  const [masterCredError, setMasterCredError] = useState<string>('');
+  const [masterCredSuccess, setMasterCredSuccess] = useState<string>('');
+  const [isUpdatingMasterCreds, setIsUpdatingMasterCreds] = useState<boolean>(false);
   const [pendingRestoreFile, setPendingRestoreFile] = useState<File | null>(null);
   const [isDriveModalOpen, setIsDriveModalOpen] = useState<boolean>(false);
+
+  const handleUpdateMasterCredentials = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMasterCredError('');
+    setMasterCredSuccess('');
+    const creds = getMasterCredentials();
+    const cleanNewId = masterIdDraft.replace(/^BD\/?/i, '').replace(/\s+/g, '').trim();
+    if (!cleanNewId) {
+      setMasterCredError('Master User ID cannot be empty.');
+      return;
+    }
+    if (!masterCurrentPin.trim()) {
+      setMasterCredError('Please enter your Current Master PIN.');
+      return;
+    }
+    if (!isMasterPinMatch(masterCurrentPin.trim()) && masterCurrentPin.trim() !== creds.masterPin) {
+      setMasterCredError('Current Master PIN is incorrect.');
+      return;
+    }
+    const finalPin = masterNewPin.trim() ? masterNewPin.trim() : creds.masterPin;
+    if (masterNewPin.trim()) {
+      if (masterNewPin.trim().length < 4) {
+        setMasterCredError('New Master PIN must be at least 4 characters.');
+        return;
+      }
+      if (masterNewPin.trim() !== masterConfirmPin.trim()) {
+        setMasterCredError('New Master PIN and Confirm PIN do not match.');
+        return;
+      }
+    }
+    setIsUpdatingMasterCreds(true);
+    try {
+      const saved = await saveMasterCredentials(cleanNewId, finalPin);
+      setMasterIdDraft(saved.masterUserId);
+      setMasterCurrentPin('');
+      setMasterNewPin('');
+      setMasterConfirmPin('');
+      setMasterCredSuccess(`Master ID (${saved.masterUserId}) & PIN updated!`);
+    } catch {
+      setMasterCredError('Failed to update Master ID & PIN.');
+    } finally {
+      setIsUpdatingMasterCreds(false);
+    }
+  };
+
+  // Auto-disappear any success messages after 5 seconds (5000ms)
+  useEffect(() => {
+    if (!masterCredSuccess && !passcodeSuccess && !adminPasscodeSuccess && !profileSavedMsg) return;
+    const t = setTimeout(() => {
+      if (masterCredSuccess) setMasterCredSuccess('');
+      if (passcodeSuccess) setPasscodeSuccess('');
+      if (adminPasscodeSuccess) setAdminPasscodeSuccess('');
+      if (profileSavedMsg) setProfileSavedMsg('');
+    }, 5000);
+    return () => clearTimeout(t);
+  }, [masterCredSuccess, passcodeSuccess, adminPasscodeSuccess, profileSavedMsg]);
 
   // In-App Software Update State (Capacitor + Supabase)
   const [currentAppVersion, setCurrentAppVersion] = useState<{ versionCode: number; versionName: string }>(DEFAULT_CURRENT_APP);
@@ -1891,6 +1957,73 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           </form>
                         ) : (
                           <button onClick={() => setEditingPasswordType('admin')} className="px-4 py-2 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 rounded-xl font-bold text-sm hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer">
+                            Update
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Master ID & PIN Item (Master Owner / Super Admin) */}
+                    {(role === 'OWNER' || role === 'master_owner' || role === 'SUPER_ADMIN') && (
+                      <div className="p-5 flex flex-col sm:flex-row gap-4 sm:items-center justify-between">
+                        <div className="flex items-center gap-4">
+                          <div className="p-3 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-xl shrink-0">
+                            <Shield className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <h4 className="text-base font-bold text-slate-900 dark:text-white">Master User ID & PIN</h4>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                              Active Master ID: <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400">{masterIdDraft}</span> — Used for Multi-Office Master Login & Control Center
+                            </p>
+                          </div>
+                        </div>
+                        {editingPasswordType === 'master' ? (
+                          <form onSubmit={handleUpdateMasterCredentials} className="flex flex-col gap-2 w-full sm:w-auto mt-4 sm:mt-0">
+                            <input
+                              type="text"
+                              placeholder="Master User ID (e.g. 48456)"
+                              value={masterIdDraft}
+                              onChange={e => setMasterIdDraft(e.target.value)}
+                              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-sm font-mono dark:text-white"
+                            />
+                            <input
+                              type="password"
+                              placeholder="Current Master PIN"
+                              value={masterCurrentPin}
+                              onChange={e => setMasterCurrentPin(e.target.value)}
+                              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-sm dark:text-white"
+                            />
+                            <input
+                              type="password"
+                              placeholder="New Master PIN (optional)"
+                              value={masterNewPin}
+                              onChange={e => setMasterNewPin(e.target.value)}
+                              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-sm dark:text-white"
+                            />
+                            <input
+                              type="password"
+                              placeholder="Confirm New Master PIN"
+                              value={masterConfirmPin}
+                              onChange={e => setMasterConfirmPin(e.target.value)}
+                              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-sm dark:text-white"
+                            />
+                            {masterCredError && <span className="text-rose-500 text-xs">{masterCredError}</span>}
+                            {masterCredSuccess && <span className="text-emerald-500 text-xs">{masterCredSuccess}</span>}
+                            <div className="flex gap-2">
+                              <button type="submit" disabled={isUpdatingMasterCreds} className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg py-1.5 text-sm font-bold transition-colors disabled:opacity-50">Save</button>
+                              <button type="button" onClick={() => setEditingPasswordType(null)} className="flex-1 bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg py-1.5 text-sm font-bold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors">Cancel</button>
+                            </div>
+                          </form>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setMasterIdDraft(getMasterUserId());
+                              setMasterCredError('');
+                              setMasterCredSuccess('');
+                              setEditingPasswordType('master');
+                            }}
+                            className="px-4 py-2 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 rounded-xl font-bold text-sm hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer"
+                          >
                             Update
                           </button>
                         )}

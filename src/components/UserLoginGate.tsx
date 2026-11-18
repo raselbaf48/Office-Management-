@@ -42,6 +42,7 @@ import {
   saveCustomOfficeConfig,
   updateActiveOfficeProfile,
   clearCustomOfficeConfig,
+  getRegisteredOfficesLocal,
   fetchRegisteredOfficesFromMaster,
   RegisteredOfficeRecord,
   submitOfficeRegistrationRequest,
@@ -49,6 +50,10 @@ import {
   getPendingOfficeRequestsLocal,
   PendingOfficeRegistrationRequest,
   isOfficeNameAlreadyRegistered,
+  getMasterUserId,
+  syncMasterCredentialsFromCloud,
+  syncBrowserTabIdentity,
+  isOfficeDisabled,
 } from '../firebase';
 import { localDb } from '../services/localDatabase';
 import { getAvailableTrades, addCustomTradeToList } from '../utils/tradeList';
@@ -96,15 +101,35 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const [isMasterPortalOpen, setIsMasterPortalOpen] = useState<boolean>(false);
   const logoClickTimestampsRef = useRef<number[]>([]);
 
-  // Master User ID Office List & Pending Approval Requests
-  const [registeredOffices, setRegisteredOffices] = useState<RegisteredOfficeRecord[]>([]);
-  const [selectedMasterOfficeId, setSelectedMasterOfficeId] = useState<string>('');
+  // Master User ID Office List & Pending Approval Requests (Pre-loaded at 0ms)
+  const [registeredOffices, setRegisteredOffices] = useState<RegisteredOfficeRecord[]>(() =>
+    getRegisteredOfficesLocal()
+  );
+  const [selectedMasterOfficeId, setSelectedMasterOfficeId] = useState<string>(() => {
+    const initialOffices = getRegisteredOfficesLocal();
+    const activeId = getActiveOfficeIdentity();
+    const currentMatch = initialOffices.find(
+      (o) =>
+        (o.officeCode || o.projectId || '').toUpperCase() ===
+          (activeId.officeCode || '').toUpperCase() ||
+        o.officeName.toUpperCase() === activeId.officeName.toUpperCase()
+    );
+    return (
+      currentMatch?.officeCode ||
+      currentMatch?.projectId ||
+      initialOffices[0]?.officeCode ||
+      initialOffices[0]?.projectId ||
+      '155-UASU'
+    );
+  });
   const [pendingOfficeRequests, setPendingOfficeRequests] = useState<PendingOfficeRegistrationRequest[]>(() =>
     getPendingOfficeRequestsLocal()
   );
 
   const loadOfficesAndPendingRequests = async () => {
     try {
+      setRegisteredOffices(getRegisteredOfficesLocal());
+      setPendingOfficeRequests(getPendingOfficeRequestsLocal());
       const [offices, requests] = await Promise.all([
         fetchRegisteredOfficesFromMaster(),
         fetchPendingOfficeRequestsFromMaster(),
@@ -190,6 +215,15 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const [isPasswordFocused, setIsPasswordFocused] = useState<boolean>(false);
   const [isConfirmFocused, setIsConfirmFocused] = useState<boolean>(false);
 
+  // Auto-disappear registerSuccessBanner after 5 seconds (5000ms)
+  useEffect(() => {
+    if (!registerSuccessBanner) return;
+    const timer = setTimeout(() => {
+      setRegisterSuccessBanner('');
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [registerSuccessBanner]);
+
   // 4-Step "Register a New Office" Wizard States
   // Step 1: Office Information | Step 2: User Information (6 Boxed Fields) | Step 3: Submit for Approval | Step 4: Submitted Confirmation
   // All boxes start completely empty (no pre-filled values) and use floating labels like the Login Portal
@@ -214,12 +248,25 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const [submittedRequestRecord, setSubmittedRequestRecord] = useState<PendingOfficeRegistrationRequest | null>(null);
   const logoInputRef = useRef<HTMLInputElement>(null);
 
+  const [activeMasterUserId, setActiveMasterUserId] = useState<string>(() => getMasterUserId());
+
+  useEffect(() => {
+    syncMasterCredentialsFromCloud()
+      .then((creds) => setActiveMasterUserId(creds.masterUserId))
+      .catch(() => {});
+    const onCredsUpdated = () => setActiveMasterUserId(getMasterUserId());
+    window.addEventListener('baf_master_credentials_updated', onCredsUpdated);
+    return () => window.removeEventListener('baf_master_credentials_updated', onCredsUpdated);
+  }, []);
+
   const cleanTypedBd = useMemo(
     () => bdInput.replace(/^BD\/?/i, '').replace(/[^0-9]/g, '').trim(),
     [bdInput]
   );
 
-  const isMasterUserTyped = cleanTypedBd === MASTER_OWNER_USER_ID;
+  const isMasterUserTyped =
+    Boolean(cleanTypedBd) &&
+    (cleanTypedBd === activeMasterUserId || cleanTypedBd === MASTER_OWNER_USER_ID);
 
   const selectedMasterOffice = useMemo(() => {
     if (!registeredOffices.length) return null;
@@ -255,7 +302,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
 
   // Header Display Rules:
   // 1. If no User ID is typed (or no office matched yet): display "Office Management"
-  // 2. If Master User ID (48456) is typed: display the selected office from the Office List
+  // 2. If Master User ID is typed: display the selected office from the Office List
   // 3. If a regular User ID is typed and matches an office: display that office's name, logo, base, and slogan
   const displayedOfficeName = useMemo(() => {
     if (!cleanTypedBd) return 'Office Management';
@@ -284,6 +331,11 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     }
     return '/155-uasu-baf-logo.png';
   }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
+
+  // Keep Browser Tab Title & Favicon synced with the displayed/selected office on Login Portal
+  useEffect(() => {
+    syncBrowserTabIdentity(displayedOfficeName, displayedOfficeLogo, '');
+  }, [displayedOfficeName, displayedOfficeLogo]);
 
   const displayedOfficeSubtitle = useMemo(() => {
     if (!cleanTypedBd) return 'Centralized Multi-Office Management System';
@@ -430,15 +482,25 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       const cleanInput = bdInput.replace(/^BD\/?/i, '').replace(/\s+/g, '').trim().toLowerCase();
       const cleanDigits = cleanInput.replace(/\D/g, '');
 
-      // Check Master Owner 48456 first
-      if ((cleanInput === MASTER_OWNER_USER_ID || cleanDigits === MASTER_OWNER_USER_ID) && isMasterPinMatch(passwordInput)) {
+      // Check Master Owner first
+      const activeMasterId = getMasterUserId().toLowerCase();
+      if (
+        (cleanInput === activeMasterId ||
+          cleanDigits === activeMasterId ||
+          cleanInput === MASTER_OWNER_USER_ID ||
+          cleanDigits === MASTER_OWNER_USER_ID) &&
+        isMasterPinMatch(passwordInput)
+      ) {
         lastAutoLoginPin.current = passwordInput;
         handleSubmit({ preventDefault: () => {} } as React.FormEvent);
         return;
       }
 
-      // Do not auto-login if user's office is still pending approval
+      // Do not auto-login if user's office is still pending approval or disabled
       if (matchedPendingRequest && !matchedUserOffice) {
+        return;
+      }
+      if (matchedUserOffice && isOfficeDisabled(matchedUserOffice.officeCode)) {
         return;
       }
 
@@ -521,8 +583,12 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       return;
     }
 
+    const activeMasterId = getMasterUserId();
+    const isMasterLoginAttempt =
+      cleanInput === activeMasterId || cleanInput === MASTER_OWNER_USER_ID;
+
     // Check if this User ID has a pending office registration request that hasn't been approved yet
-    if (matchedPendingRequest && !matchedUserOffice && cleanInput !== MASTER_OWNER_USER_ID) {
+    if (matchedPendingRequest && !matchedUserOffice && !isMasterLoginAttempt) {
       setErrorMsg(
         `Your registration for "${matchedPendingRequest.officeName}" is awaiting approval in the Master Admin Panel.`
       );
@@ -531,8 +597,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
 
     setIsLoading(true);
 
-    // Master User ID (48456) Office Selection Login
-    if (cleanInput === MASTER_OWNER_USER_ID) {
+    // Master User ID Office Selection Login
+    if (isMasterLoginAttempt) {
       if (!isMasterPinMatch(cleanPin)) {
         setErrorMsg('Invalid Master PIN.');
         setPasswordInput('');
@@ -541,6 +607,9 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       }
 
       await activateSelectedMasterOffice(selectedMasterOffice);
+      const activeId = getActiveOfficeIdentity();
+      syncBrowserTabIdentity(activeId.officeName, activeId.officeLogo, activeId.officeBase);
+
       const targetAirmen = (() => {
         try {
           return localDb.getAirmen() || airmen;
@@ -553,8 +622,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       setLastUsedPortal(activeTab);
 
       setSuccessAirman({
-        id: 'master-owner-48456',
-        bdNo: MASTER_OWNER_USER_ID,
+        id: `master-owner-${activeMasterId}`,
+        bdNo: activeMasterId,
         rank: 'System',
         name: 'Master Admin',
         fullName: 'App Owner / Master Admin',
@@ -573,14 +642,28 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
 
     // Regular User: If BD No matches an office in the Global Multi-Office Directory, activate that office workspace before validating login
     const targetOfficeMatch = findOfficeByUserId(cleanInput, airmen);
-    if (targetOfficeMatch && cleanInput !== MASTER_OWNER_USER_ID) {
+    if (targetOfficeMatch && !isMasterLoginAttempt) {
+      if (isOfficeDisabled(targetOfficeMatch.officeCode)) {
+        setErrorMsg(
+          `Office "${targetOfficeMatch.officeName}" has been disabled by the Master Administrator.`
+        );
+        setPasswordInput('');
+        setIsLoading(false);
+        return;
+      }
       const switched = activateMatchedOfficeForUser(targetOfficeMatch);
       if (switched) {
         try {
           localDb.switchActiveOfficeWorkspace(false);
         } catch {}
       }
-      setOfficeIdentity(getActiveOfficeIdentity());
+      const updatedIdentity = getActiveOfficeIdentity();
+      setOfficeIdentity(updatedIdentity);
+      syncBrowserTabIdentity(
+        updatedIdentity.officeName,
+        updatedIdentity.officeLogo,
+        updatedIdentity.officeBase
+      );
     }
 
     const activeOfficeAirmen = (() => {
@@ -616,12 +699,18 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         return;
       }
       setSuccessAirman(airman);
-      const assignedLoginRole =
-        cleanInput === MASTER_OWNER_USER_ID ? 'master_owner' : role || 'USER';
+      const assignedLoginRole = isMasterLoginAttempt ? 'master_owner' : role || 'USER';
       setUserSession(airman as any, assignedLoginRole as any, validation.detailedUser);
 
-      // Do not store 48456 in recent logins list so it stays invisible to regular office users
-      if (cleanInput !== MASTER_OWNER_USER_ID) {
+      const finalIdentity = getActiveOfficeIdentity();
+      syncBrowserTabIdentity(
+        finalIdentity.officeName,
+        finalIdentity.officeLogo,
+        finalIdentity.officeBase
+      );
+
+      // Do not store Master ID in recent logins list so it stays invisible to regular office users
+      if (!isMasterLoginAttempt) {
         const updatedRecents = [cleanInput, ...officeRecentLogins.filter((x) => x !== cleanInput)].slice(0, 4);
         setOfficeRecentLogins(updatedRecents);
         localStorage.setItem('baf_recent_logins', JSON.stringify(updatedRecents));
