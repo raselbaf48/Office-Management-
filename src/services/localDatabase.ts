@@ -27,6 +27,8 @@ import {
   updateOfficeTelemetryUserCount,
   getOfficeScopedStorageKey,
   isDefault155UasuOffice,
+  markUserPostedOutInGlobalDirectory,
+  registerUsersInGlobalOfficeDirectory,
 } from '../firebase';
 import {
   fetchAirmenFromFirebase,
@@ -341,6 +343,8 @@ const IGNORED_SETTING_KEYS = new Set<string>([
   'baf_custom_office_firebase_config_v1',
   'baf_master_registered_offices_cache',
   'baf_custom_office_clean_v3',
+  'baf_pending_office_requests_v1',
+  'baf_global_user_office_map_v1',
 ]);
 
 function isSyncableSettingKey(key: string): boolean {
@@ -2482,7 +2486,7 @@ export class LocalDatabaseEngine {
       permanentAddress: data.permanentAddress || '',
       bloodGroup: data.bloodGroup || '',
       mobileNo: data.mobileNo || '01700000000',
-      flightName: (data.flightName as FlightName) || 'Admin',
+      flightName: (String(data.flightName || '').trim() ? data.flightName : (isDefault155UasuOffice() ? 'Admin' : '')) as FlightName,
       remarks: data.remarks || 'Newly Enlisted',
       dateJoined: data.dateJoined || '',
       dateLeft: data.dateLeft || '',
@@ -2500,6 +2504,7 @@ export class LocalDatabaseEngine {
     }
     this.logSystemAction(newAirman.id, `${newAirman.rank} ${newAirman.name}`, 'Added new airman to Nominal Roll');
     this.saveToStorage();
+    registerUsersInGlobalOfficeDirectory([newAirman as any]);
     updateOfficeTelemetryUserCount(this.getAirmen().length).catch(() => {});
 
     return this.db.airmen.find(a => a.id === id) || newAirman;
@@ -2527,7 +2532,7 @@ export class LocalDatabaseEngine {
         permanentAddress: item.permanentAddress || '',
         bloodGroup: item.bloodGroup || '',
         mobileNo: item.mobileNo || '01700000000',
-        flightName: (item.flightName as FlightName) || 'Admin',
+        flightName: (String(item.flightName || '').trim() ? item.flightName : (isDefault155UasuOffice() ? 'Admin' : '')) as FlightName,
         dateJoined: item.dateJoined || '',
         remarks: item.remarks || 'Bulk Imported',
         active: true,
@@ -2539,6 +2544,7 @@ export class LocalDatabaseEngine {
 
     this.db.airmen = normalizeAirmenSeniority(this.db.airmen);
     this.saveToStorage();
+    registerUsersInGlobalOfficeDirectory(createdAirmen as any[]);
     updateOfficeTelemetryUserCount(this.getAirmen().length).catch(() => {});
 
     // Log in activity history
@@ -2598,8 +2604,12 @@ export class LocalDatabaseEngine {
 
     if (previous.active && !data.active) {
       this.logSystemAction(canonicalId, `${previous.rank} ${previous.name}`, 'Posted out / Marked inactive from Nominal Roll');
+      markUserPostedOutInGlobalDirectory(cleanBd, true);
     } else if (!previous.active && data.active) {
       this.logSystemAction(canonicalId, `${previous.rank} ${previous.name}`, 'Reactivated in Nominal Roll');
+      markUserPostedOutInGlobalDirectory(cleanBd, false);
+    } else if (data.active === false) {
+      markUserPostedOutInGlobalDirectory(cleanBd, true);
     }
 
     this.saveToStorage(this.db, true, false);
@@ -2620,6 +2630,7 @@ export class LocalDatabaseEngine {
     }
     if (target) {
         this.logSystemAction(id, `${target.rank} ${target.name}`, 'Permanently deleted from Nominal Roll');
+        markUserPostedOutInGlobalDirectory(target.bdNo || id, true);
     }
     this.db.airmen = normalizeAirmenSeniority(this.db.airmen.filter((a) => a.id !== id));
 

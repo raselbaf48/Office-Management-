@@ -7,7 +7,8 @@ import {
   isMasterProtectedUser,
   MASTER_OWNER_USER_ID,
 } from '../utils/authSession';
-import { updateOfficeTelemetryUserCount } from '../firebase';
+import { updateOfficeTelemetryUserCount, doesOfficeHaveFlights } from '../firebase';
+import { getAvailableTrades } from '../utils/tradeList';
 
 interface UserManagementTabProps {
   nominalAirmen: Airman[];
@@ -22,6 +23,12 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<'ALL' | 'USER' | 'ADMIN' | 'SUPER_ADMIN'>('ALL');
   const [flightFilter, setFlightFilter] = useState<string>('ALL');
+  const [tradeFilter, setTradeFilter] = useState<string>('ALL');
+  const officeHasFlights = doesOfficeHaveFlights(nominalAirmen);
+  const tradesList = useMemo(
+    () => getAvailableTrades(nominalAirmen.map((a) => a.trade || '')),
+    [nominalAirmen]
+  );
   
   const [detailedUsers, setDetailedUsers] = useState<DetailedUserLogin[]>(() => getDetailedUsers(nominalAirmen));
   
@@ -112,8 +119,11 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
     if (roleFilter !== 'ALL') {
       filtered = filtered.filter(u => u.role === roleFilter);
     }
-    if (flightFilter !== 'ALL') {
+    if (officeHasFlights && flightFilter !== 'ALL') {
       filtered = filtered.filter(u => (u.flight || u.flightName || u.airman?.flightName) === flightFilter);
+    }
+    if (!officeHasFlights && tradeFilter !== 'ALL') {
+      filtered = filtered.filter(u => (u.trade || u.airman?.trade) === tradeFilter);
     }
     
     return filtered.sort((a, b) => {
@@ -121,7 +131,7 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
       if (a.role !== 'SUPER_ADMIN' && a.role !== 'OWNER' && (b.role === 'SUPER_ADMIN' || b.role === 'OWNER')) return 1;
       return 0;
     });
-  }, [nominalAirmen, detailedUsers, searchQuery, roleFilter, flightFilter]);
+  }, [nominalAirmen, detailedUsers, searchQuery, roleFilter, flightFilter, tradeFilter, officeHasFlights]);
 
   const openProfile = (user: any) => {
     if (!isAdmin) return;
@@ -303,11 +313,17 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
                     )}
                   </div>
                   <div>
-                    <p className="text-xs font-bold text-slate-500 uppercase">Flight / Branch</p>
-                    {isEditingProfile ? (
-                      <input type="text" value={editFlight} onChange={(e) => setEditFlight(e.target.value)} className="w-full bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded px-3 py-1.5 text-sm outline-none text-slate-900 dark:text-white" />
+                    <p className="text-xs font-bold text-slate-500 uppercase">
+                      {officeHasFlights ? 'Flight / Branch' : 'Trade'}
+                    </p>
+                    {officeHasFlights ? (
+                      isEditingProfile ? (
+                        <input type="text" value={editFlight} onChange={(e) => setEditFlight(e.target.value)} className="w-full bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded px-3 py-1.5 text-sm outline-none text-slate-900 dark:text-white" />
+                      ) : (
+                        <p className="text-sm font-medium text-slate-900 dark:text-white">{selectedUser.flightName || selectedUser.airman?.flightName || '-'}</p>
+                      )
                     ) : (
-                      <p className="text-sm font-medium text-slate-900 dark:text-white">{selectedUser.flightName || selectedUser.airman?.flightName || '-'}</p>
+                      <p className="text-sm font-medium text-slate-900 dark:text-white">{selectedUser.trade || selectedUser.airman?.trade || '-'}</p>
                     )}
                   </div>
                   <div>
@@ -452,17 +468,30 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
                 />
               </div>
               <div className="flex items-center gap-2 w-full sm:w-auto">
-                <select 
-                  value={flightFilter} 
-                  onChange={(e) => setFlightFilter(e.target.value)} 
-                  className="flex-1 sm:w-36 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2 py-2 text-sm text-slate-900 dark:text-white focus:border-emerald-500 outline-none h-10"
-                >
-                  <option value="ALL">All Flights</option>
-                  <option value="Mechanics">Mechanics</option>
-                  <option value="Avionics">Avionics</option>
-                  <option value="GCS">GCS</option>
-                  <option value="Admin">Admin</option>
-                </select>
+                {officeHasFlights ? (
+                  <select 
+                    value={flightFilter} 
+                    onChange={(e) => setFlightFilter(e.target.value)} 
+                    className="flex-1 sm:w-36 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2 py-2 text-sm text-slate-900 dark:text-white focus:border-emerald-500 outline-none h-10"
+                  >
+                    <option value="ALL">All Flights</option>
+                    <option value="Mechanics">Mechanics</option>
+                    <option value="Avionics">Avionics</option>
+                    <option value="GCS">GCS</option>
+                    <option value="Admin">Admin</option>
+                  </select>
+                ) : (
+                  <select 
+                    value={tradeFilter} 
+                    onChange={(e) => setTradeFilter(e.target.value)} 
+                    className="flex-1 sm:w-40 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2 py-2 text-sm text-slate-900 dark:text-white focus:border-emerald-500 outline-none h-10"
+                  >
+                    <option value="ALL">All Trades</option>
+                    {tradesList.map((tr) => (
+                      <option key={tr} value={tr}>{tr}</option>
+                    ))}
+                  </select>
+                )}
                 <select 
                   value={roleFilter} 
                   onChange={(e) => setRoleFilter(e.target.value as any)} 

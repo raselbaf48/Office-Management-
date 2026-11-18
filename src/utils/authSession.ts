@@ -10,6 +10,9 @@ import {
   getOfficeScopedStorageKey,
   getOfficeFirestoreDocPrefix,
   isDefault155UasuOffice,
+  registerUsersInGlobalOfficeDirectory,
+  findOfficeByUserId,
+  activateMatchedOfficeForUser,
 } from '../firebase';
 import { fetchUserProfilesFromFirebase, pushUserProfilesToFirebase } from '../services/firebaseFirestoreService';
 import { localDb } from '../services/localDatabase';
@@ -353,6 +356,7 @@ export const saveDetailedUsers = (users: DetailedUserLogin[], syncToCloud: boole
   try {
     const storageKey = getDetailedUsersStorageKey();
     localStorage.setItem(storageKey, JSON.stringify(users));
+    registerUsersInGlobalOfficeDirectory(users);
     window.dispatchEvent(new CustomEvent('baf_detailed_users_changed', { detail: users }));
 
     if (syncToCloud) {
@@ -533,6 +537,17 @@ export const validateUserLogin = async (
     }
   }
 
+  // 0. Multi-Office Directory Lookup: Match BD No to its Office and switch active workspace automatically
+  const globalMatch = findOfficeByUserId(cleanInput, nominalAirmen);
+  if (globalMatch && cleanInput !== '48456' && cleanDigits !== '48456') {
+    const switched = activateMatchedOfficeForUser(globalMatch);
+    if (switched) {
+      try {
+        (localDb as any).switchActiveOfficeWorkspace?.(false);
+      } catch {}
+    }
+  }
+
   // 1. Instant Local Verification (Zero latency check)
   const detailedList = getDetailedUsers(nominalAirmen);
   let matchedDetail = detailedList.find((u) => {
@@ -575,6 +590,31 @@ export const validateUserLogin = async (
         saveDetailedUsers(detailedList);
       }
     } catch {}
+  }
+
+  // Also check globalMatch if the user was registered in the global office directory on another device
+  if (!matchedDetail && globalMatch) {
+    const cleanBdNo = globalMatch.bdNo;
+    matchedDetail = {
+      id: `user-login-${cleanBdNo}`,
+      userId: cleanBdNo,
+      airmanId: `airman-${cleanBdNo}`,
+      bdNo: cleanBdNo,
+      rank: (globalMatch.rank || 'LAC') as any,
+      name: globalMatch.userName || 'Airman',
+      fullName: globalMatch.userName || 'Airman',
+      flightName: (globalMatch.flightName || 'Admin') as any,
+      trade: globalMatch.trade || 'General',
+      role: (globalMatch.role || 'USER') as any,
+      pin: globalMatch.pin || cleanBdNo,
+      password: globalMatch.pin || cleanBdNo,
+      status: 'ACTIVE',
+      detailOrder: `DO-${globalMatch.officeCode}/${cleanBdNo}`,
+      detailedAt: globalMatch.updatedAt || new Date().toISOString(),
+      detailedBy: 'Office Directory Sync',
+    };
+    detailedList.push(matchedDetail);
+    saveDetailedUsers(detailedList);
   }
 
   if (matchedDetail) {

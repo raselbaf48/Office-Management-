@@ -12,7 +12,8 @@ import { localDb } from '../services/localDatabase';
 import { formatShortDate, normalizeDateToISO } from '../utils/csvExport';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
-import { getActiveOfficeIdentity, isDefault155UasuOffice } from '../firebase';
+import { getActiveOfficeIdentity, isDefault155UasuOffice, doesOfficeHaveFlights } from '../firebase';
+import { getAvailableTrades } from '../utils/tradeList';
 interface NominalRollProps {
   variant?: 'nominal' | 'biodata';
   airmen: Airman[];
@@ -41,8 +42,11 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
 }) => {
   const [search, setSearch] = useState('');
   const [flightFilter, setFlightFilter] = useState<FlightName | 'All' | ''>(initialFlightFilter);
+  const [tradeFilter, setTradeFilter] = useState<string>('All');
   const [rankFilter, setRankFilter] = useState<Rank | 'All' | ''>('All');
   const [statusFilter, setStatusFilter] = useState<'Total' | 'Active' | 'Previous Airmen'>('Active');
+  const officeHasFlights = doesOfficeHaveFlights(airmen);
+  const tradesList = ['All', ...getAvailableTrades(airmen.map((a) => a.trade || ''))];
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
@@ -106,7 +110,8 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
       matchesStatus = airman.active === false;
     }
     
-    const matchesFlight = flightFilter === '' ? true : (flightFilter === 'All' || airman.flightName === flightFilter);
+    const matchesFlight = !officeHasFlights || flightFilter === '' ? true : (flightFilter === 'All' || airman.flightName === flightFilter);
+    const matchesTrade = tradeFilter === '' || tradeFilter === 'All' ? true : airman.trade === tradeFilter;
     const matchesRank = rankFilter === '' ? true : (rankFilter === 'All' || airman.rank === rankFilter);
     const q = search.toLowerCase();
     const matchesSearch =
@@ -117,7 +122,7 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
       airman.trade.toLowerCase().includes(q) ||
       airman.addressBlock.toLowerCase().includes(q);
 
-    return matchesStatus && matchesFlight && matchesRank && matchesSearch;
+    return matchesStatus && matchesFlight && matchesTrade && matchesRank && matchesSearch;
   });
 
   const handlePrint = () => {
@@ -206,21 +211,39 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
-          {/* Flight Filter */}
-          <div className="flex items-center space-x-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-1.5 text-xs">
-            <span className="text-slate-400 font-medium">Flight:</span>
-            <select
-              value={flightFilter}
-              onChange={(e) => setFlightFilter(e.target.value as any)}
-              className="bg-transparent font-black outline-none text-slate-900 dark:text-slate-100 cursor-pointer"
-            >
-              {flightsList.map((fl) => (
-                <option key={fl} value={fl} className="bg-white dark:bg-slate-900">
-                  {fl === 'All' ? 'All Flights' : `${fl} Flight`}
-                </option>
-              ))}
-            </select>
-          </div>
+          {officeHasFlights ? (
+            /* Flight Filter */
+            <div className="flex items-center space-x-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-1.5 text-xs">
+              <span className="text-slate-400 font-medium">Flight:</span>
+              <select
+                value={flightFilter}
+                onChange={(e) => setFlightFilter(e.target.value as any)}
+                className="bg-transparent font-black outline-none text-slate-900 dark:text-slate-100 cursor-pointer"
+              >
+                {flightsList.map((fl) => (
+                  <option key={fl} value={fl} className="bg-white dark:bg-slate-900">
+                    {fl === 'All' ? 'All Flights' : `${fl} Flight`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            /* Trade Filter (Replaces Flight Filter when Office has no Flight) */
+            <div className="flex items-center space-x-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-1.5 text-xs">
+              <span className="text-slate-400 font-medium">Trade:</span>
+              <select
+                value={tradeFilter}
+                onChange={(e) => setTradeFilter(e.target.value)}
+                className="bg-transparent font-black outline-none text-slate-900 dark:text-slate-100 cursor-pointer"
+              >
+                {tradesList.map((tr) => (
+                  <option key={tr} value={tr} className="bg-white dark:bg-slate-900">
+                    {tr === 'All' ? 'All Trades' : tr}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Rank Filter */}
           <div className="flex items-center space-x-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-1.5 text-xs">
@@ -268,7 +291,7 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                 <th className="py-3 px-4">Rank</th>
                 <th className="py-3 px-4">Full Name</th>
                 <th className="py-3 px-4">Trade</th>
-                <th className="py-3 px-4">Flight</th>
+                {officeHasFlights && <th className="py-3 px-4">Flight</th>}
                 {variant === 'biodata' && <th className="py-3 px-4">Blood Group</th>}
                 {variant === 'biodata' && <th className="py-3 px-4 text-center">Gmail Address</th>}
                 <th className="py-3 px-4">{variant === 'biodata' ? 'Present Address' : 'Address'}</th>
@@ -345,18 +368,20 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                   <td className="py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">
                     {airman.trade}
                   </td>
-                  <td className="py-3 px-4">
-                    <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                      {(() => {
-                        const fl = airman.flightName || (airman as any).flight || (airman as any).Flight;
-                        if (fl && fl.trim()) return fl;
-                        const initMatch = isDefault155UasuOffice()
-                          ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))
-                          : undefined;
-                        return initMatch?.flightName || 'Admin';
-                      })()}
-                    </span>
-                  </td>
+                  {officeHasFlights && (
+                    <td className="py-3 px-4">
+                      <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                        {(() => {
+                          const fl = airman.flightName || (airman as any).flight || (airman as any).Flight;
+                          if (fl && fl.trim()) return fl;
+                          const initMatch = isDefault155UasuOffice()
+                            ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))
+                            : undefined;
+                          return initMatch?.flightName || 'Admin';
+                        })()}
+                      </span>
+                    </td>
+                  )}
                   {variant === 'biodata' && (
                     <td className="py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">
                       {airman.bloodGroup || (isDefault155UasuOffice() ? INITIAL_AIRMEN.find(i => i.bdNo === airman.bdNo)?.bloodGroup : undefined) || '-'}

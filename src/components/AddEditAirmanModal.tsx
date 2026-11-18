@@ -3,7 +3,8 @@ import { Airman, FlightName, Rank } from '../types';
 import { X, Check, Building2, Home, MapPin, User, Phone, Shield, AlertCircle, Mail } from 'lucide-react';
 import { getRankSeniorityRange, resolveTargetSeniority, isJcoRank } from '../utils/seniority';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
-import { getActiveOfficeIdentity, isDefault155UasuOffice } from '../firebase';
+import { getActiveOfficeIdentity, isDefault155UasuOffice, doesOfficeHaveFlights, findOfficeByUserId } from '../firebase';
+import { getAvailableTrades, addCustomTradeToList } from '../utils/tradeList';
 
 interface AddEditAirmanModalProps {
   variant?: 'nominal' | 'biodata';
@@ -26,13 +27,24 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
     return INITIAL_AIRMEN.find((a) => (a.bdNo || '').replace(/^BD\/?/i, '').trim() === cleanBd);
   }, [airmanToEdit]);
 
+  const officeHasFlights = useMemo(() => doesOfficeHaveFlights(existingAirmen), [existingAirmen]);
+  const [availableTrades, setAvailableTrades] = useState<string[]>(() =>
+    getAvailableTrades([
+      ...(existingAirmen || []).map((a) => a.trade || ''),
+      airmanToEdit?.trade || initialMatch?.trade || '',
+    ])
+  );
+  const [customTrade, setCustomTrade] = useState('');
+
   const [fullName, setFullName] = useState(airmanToEdit?.fullName || initialMatch?.fullName || airmanToEdit?.name || '');
   const [name, setName] = useState(airmanToEdit?.name || initialMatch?.name || '');
   const [bdNo, setBdNo] = useState(airmanToEdit?.bdNo || '');
   const [code, setCode] = useState(airmanToEdit?.code || '');
   const [rank, setRank] = useState<Rank | ''>(airmanToEdit?.rank || (initialMatch?.rank as any) || '');
   const [trade, setTrade] = useState(airmanToEdit?.trade || initialMatch?.trade || '');
-  const [flightName, setFlightName] = useState<FlightName | ''>(airmanToEdit?.flightName || (initialMatch?.flightName as any) || '');
+  const [flightName, setFlightName] = useState<FlightName | ''>(
+    airmanToEdit?.flightName || (initialMatch?.flightName as any) || ''
+  );
   const [email, setEmail] = useState((airmanToEdit as any)?.email || (airmanToEdit as any)?.gmail || initialMatch?.email || '');
   const [mobileNo, setMobileNo] = useState(airmanToEdit?.mobileNo || initialMatch?.mobileNo || '');
   const [bloodGroup, setBloodGroup] = useState(airmanToEdit?.bloodGroup || initialMatch?.bloodGroup || '');
@@ -193,14 +205,19 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
 
     if (!name.trim()) return setValidationError('Please fill in required field: Surname');
     if (!fullName.trim()) return setValidationError('Please fill in required field: Full Name');
-        const rawBd = bdNo.trim().replace(/^BD\/?/i, '').replace(/\s+/g, '');
-    if (!/^[4]\d{5}$/.test(rawBd)) return setValidationError('BD Number must be exactly 6 digits and start with 4');
+    const rawBd = bdNo.trim().replace(/^BD\/?/i, '').replace(/\s+/g, '');
+    if (!/^\d{5,6}$/.test(rawBd)) return setValidationError('Please enter a valid numeric BD Number');
     if (!rank) return setValidationError('Please select a Rank');
-    if (!trade.trim()) return setValidationError('Please enter a Trade');
-    if (!flightName) return setValidationError('Please select a Flight');
-        const rawMobile = mobileNo.trim().replace(/\s+/g, '');
-    if (!/^\d{11}$/.test(rawMobile)) return setValidationError('Mobile Number must be exactly 11 digits');
-    
+    const finalTrade = (trade === '__CUSTOM__' ? customTrade : trade).trim();
+    if (!finalTrade) {
+      return setValidationError(trade === '__CUSTOM__' ? 'Please enter Custom Trade name' : 'Please select a Trade');
+    }
+    if (officeHasFlights && !flightName) return setValidationError('Please select a Flight');
+    const rawMobile = mobileNo.trim().replace(/\s+/g, '');
+    if (!/^01\d{9}$/.test(rawMobile)) {
+      return setValidationError('Mobile Number must be 11 digits and start with 01');
+    }
+
     if (!livingType) return setValidationError('Please select Living Status (L/In or L/Out)');
     if (livingType === 'L_IN' && !blockNo.trim()) return setValidationError('Please enter Block No for Live-In address');
     if (livingType === 'L_OUT') {
@@ -213,17 +230,40 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
       if (leaveReason === 'Custom' && !customLeaveReason.trim()) return setValidationError('Please enter a custom reason');
     }
 
-    // BD Number Uniqueness check (Part 2)
+    // 1. Cross-Office Active Member BD Number Uniqueness Check:
+    // A person cannot be an Active member in 2 offices at the same time. If Posted Out in the other office, findOfficeByUserId returns null and allows adding here.
+    if (!airmanToEdit) {
+      const currentOfficeCode = String(getActiveOfficeIdentity().officeCode || '155-UASU').toUpperCase().trim();
+      const crossOfficeActiveMatch = findOfficeByUserId(rawBd, existingAirmen);
+      if (
+        crossOfficeActiveMatch &&
+        String(crossOfficeActiveMatch.officeCode || '').toUpperCase().trim() !== currentOfficeCode
+      ) {
+        setValidationError(
+          `BD/${rawBd} is currently an Active member in "${crossOfficeActiveMatch.officeName}". An active member cannot belong to two offices unless Posted Out.`
+        );
+        return;
+      }
+    }
+
+    // 2. Same-Office Active BD Number Uniqueness check
     const normalizedNewBd = bdNo.trim().replace(/^BD\/?/i, '').replace(/\s+/g, '').toLowerCase();
     const duplicateAirman = existingAirmen.find((a) => {
       if (airmanToEdit && a.id === airmanToEdit.id) return false;
       const existingBd = a.bdNo.trim().replace(/^BD\/?/i, '').replace(/\s+/g, '').toLowerCase();
-      return existingBd === normalizedNewBd;
+      return existingBd === normalizedNewBd && a.active !== false && !a.dateLeft;
     });
 
     if (duplicateAirman) {
-      setValidationError(`An airman with BD Number ${bdNo.trim()} (${duplicateAirman.rank} ${duplicateAirman.name} - ${duplicateAirman.flightName}) already exists in the Nominal Roll.`);
+      setValidationError(
+        `An active airman with BD Number ${bdNo.trim()} (${duplicateAirman.rank} ${duplicateAirman.name}) already exists in this Office.`
+      );
       return;
+    }
+
+    if (trade === '__CUSTOM__' && finalTrade) {
+      const nextTrades = addCustomTradeToList(finalTrade);
+      setAvailableTrades(nextTrades);
     }
 
     const finalAddress = computeFinalAddress();
@@ -235,10 +275,10 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
       bdNo: bdNo.trim(),
       code: code || `${rank}-${name.slice(0, 3).toUpperCase()}`,
       rank,
-      trade: trade.trim() || 'General Tech',
-      flightName,
+      trade: finalTrade || 'Radio Fitt',
+      flightName: officeHasFlights ? flightName : ('' as FlightName),
       addressBlock: finalAddress,
-      mobileNo: mobileNo.trim() || '01',
+      mobileNo: rawMobile,
       email: email.trim() || undefined,
       bloodGroup: bloodGroup || '',
       permanentAddress: isAddressPreset ? `Vill: ${addrVill.trim()}; P/O: ${addrPO.trim()}; P/S: ${addrPS.trim()}; Dist: ${addrDist.trim()}` : permanentAddress.trim(),
@@ -377,12 +417,36 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
                 className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
               >
                 <option value="" disabled>Select Trade</option>
-                {['Afr Fitt', 'Eng Fitt', 'E&I Fitt', 'Radio Fitt', 'Armt Fitt', 'GS', 'Log Asst', 'Sec Asst (GD)', 'Sec Asst (Accts)', 'Admin Asst', 'ATCA', 'Cy Asst', 'IT Asst'].map((t) => (
+                {availableTrades.map((t) => (
                   <option key={t} value={t}>
                     {t}
                   </option>
                 ))}
+                <option value="__CUSTOM__" className="font-bold text-emerald-600 dark:text-emerald-400">
+                  Custom
+                </option>
               </select>
+              {trade === '__CUSTOM__' && (
+                <input
+                  type="text"
+                  value={customTrade}
+                  onChange={(e) => {
+                    setCustomTrade(e.target.value);
+                    if (validationError) setValidationError('');
+                  }}
+                  onBlur={() => {
+                    if (customTrade.trim()) {
+                      const saved = customTrade.trim();
+                      const nextTrades = addCustomTradeToList(saved);
+                      setAvailableTrades(nextTrades);
+                      setTrade(saved);
+                      setCustomTrade('');
+                    }
+                  }}
+                  placeholder="Type custom trade name..."
+                  className="mt-2 w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-emerald-500 rounded-xl text-sm font-semibold text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                />
+              )}
             </div>
           </div>
 
@@ -437,42 +501,46 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
           )}
 
           {/* Flight & Mobile */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                Flight <span className="text-red-500">*</span>
-              </label>
-              <select
-                value={flightName}
-                required
-                onChange={(e) => {
-                  setFlightName(e.target.value as any);
-                  if (validationError) setValidationError('');
-                }}
-                className={`w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-sm font-semibold text-slate-900 dark:text-white focus:outline-none cursor-pointer ${!flightName ? 'border-amber-400 bg-amber-50/40' : 'border-slate-300 dark:border-slate-700'}`}
-              >
-                <option value="" disabled>-- Select Flight --</option>
-                <option value="Avionics">Avionics Flight</option>
-                <option value="Mechanics">Mechanics Flight</option>
-                <option value="GCS">GCS Flight</option>
-                <option value="Admin">Admin Flight</option>
-              </select>
-            </div>
+          <div className={`grid grid-cols-1 ${officeHasFlights ? 'sm:grid-cols-2' : ''} gap-4`}>
+            {officeHasFlights && (
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Flight <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={flightName}
+                  required
+                  onChange={(e) => {
+                    setFlightName(e.target.value as any);
+                    if (validationError) setValidationError('');
+                  }}
+                  className={`w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-sm font-semibold text-slate-900 dark:text-white focus:outline-none cursor-pointer ${!flightName ? 'border-amber-400 bg-amber-50/40' : 'border-slate-300 dark:border-slate-700'}`}
+                >
+                  <option value="" disabled>-- Select Flight --</option>
+                  <option value="Avionics">Avionics Flight</option>
+                  <option value="Mechanics">Mechanics Flight</option>
+                  <option value="GCS">GCS Flight</option>
+                  <option value="Admin">Admin Flight</option>
+                </select>
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
                 Mobile Number <span className="text-red-500">*</span>
               </label>
               <input
-                type="text"
+                type="tel"
+                inputMode="numeric"
+                maxLength={11}
                 required
                 value={mobileNo}
                 onChange={(e) => {
-                  setMobileNo(e.target.value);
+                  setMobileNo(e.target.value.replace(/[^0-9]/g, '').slice(0, 11));
                   if (validationError) setValidationError('');
                 }}
-                placeholder=""
-                className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                placeholder="01XXXXXXXXX"
+                className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-semibold text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
               />
             </div>
           </div>

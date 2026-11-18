@@ -15,7 +15,8 @@ import { getCurrentUserSession } from '../utils/authSession';
 import { checkDutyPermission, isDateInPast } from '../utils/dutyPermissions';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { getAirmanJoinDateISO, getAirmanLeftDateISO, isAirmanInUnitForMonth } from '../utils/csvExport';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
+import { getAvailableTrades } from '../utils/tradeList';
 import { localDb } from '../services/localDatabase';
 interface RestoreItem {
   airmanId: string;
@@ -147,7 +148,10 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
   const [showPrintPreview, setShowPrintPreview] = useState<boolean>(false);
 
   // Filters
+  const hasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
+  const availableTrades = useMemo(() => getAvailableTrades(airmen.map(a => a.trade || '')), [airmen]);
   const [flightFilter, setFlightFilter] = useState<FlightName | 'All'>('All');
+  const [tradeFilter, setTradeFilter] = useState<string>('All');
   const [search, setSearch] = useState('');
   const [showConflictsOnly, setShowConflictsOnly] = useState(false);
   const [showHistoryModal, setShowHistoryModal] = useState<boolean>(false);
@@ -914,19 +918,22 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
 
   // Filter airmen list (only personnel active in unit during this period)
   const filteredAirmen = eligibleAirmenForMonth.filter((airman) => {
-    const matchesFlight = flightFilter === 'All' || airman.flightName === flightFilter;
+    const matchesFlightOrTrade = hasFlights
+      ? (flightFilter === 'All' || airman.flightName === flightFilter)
+      : (tradeFilter === 'All' || (airman.trade || '').trim() === tradeFilter);
     const q = search.toLowerCase();
     const matchesSearch =
       airman.name.toLowerCase().includes(q) ||
       airman.bdNo.toLowerCase().includes(q) ||
-      airman.code.toLowerCase().includes(q);
+      airman.code.toLowerCase().includes(q) ||
+      (airman.trade || '').toLowerCase().includes(q);
 
     if (showConflictsOnly) {
       const hasAlert = alerts.some((al) => al.airmanId === airman.id);
-      return matchesFlight && matchesSearch && hasAlert;
+      return matchesFlightOrTrade && matchesSearch && hasAlert;
     }
 
-    return matchesFlight && matchesSearch;
+    return matchesFlightOrTrade && matchesSearch;
   });
 
   const monthName = new Date(currentYear, currentMonth - 1, 1).toLocaleString('en-US', {
@@ -1112,18 +1119,33 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
 
         <div className="flex items-center space-x-3 w-full sm:w-auto">
           <div className="flex items-center space-x-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs">
-            <span className="text-slate-400 font-medium">Flight:</span>
-            <select
-              value={flightFilter}
-              onChange={(e) => setFlightFilter(e.target.value as any)}
-              className="bg-transparent font-bold outline-none text-slate-900 dark:text-slate-100 cursor-pointer"
-            >
-              {['All', 'Avionics', 'Mechanics', 'GCS', 'Admin'].map((fl) => (
-                <option key={fl} value={fl} className="bg-white dark:bg-slate-900">
-                  {fl}
-                </option>
-              ))}
-            </select>
+            <span className="text-slate-400 font-medium">{hasFlights ? 'Flight:' : 'Trade:'}</span>
+            {hasFlights ? (
+              <select
+                value={flightFilter}
+                onChange={(e) => setFlightFilter(e.target.value as any)}
+                className="bg-transparent font-bold outline-none text-slate-900 dark:text-slate-100 cursor-pointer"
+              >
+                {['All', 'Avionics', 'Mechanics', 'GCS', 'Admin'].map((fl) => (
+                  <option key={fl} value={fl} className="bg-white dark:bg-slate-900">
+                    {fl}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <select
+                value={tradeFilter}
+                onChange={(e) => setTradeFilter(e.target.value)}
+                className="bg-transparent font-bold outline-none text-slate-900 dark:text-slate-100 cursor-pointer"
+              >
+                <option value="All" className="bg-white dark:bg-slate-900">All Trades</option>
+                {availableTrades.map((tr) => (
+                  <option key={tr} value={tr} className="bg-white dark:bg-slate-900">
+                    {tr}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           <div className="text-xs text-slate-500 font-medium hidden md:flex items-center space-x-3">

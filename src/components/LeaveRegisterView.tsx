@@ -8,7 +8,8 @@ import { getOptimalMinColumnWidth } from '../utils/tableUtils';
 import { EntryHistoryModal } from './EntryHistoryModal';
 import { getAirmanDisposalForRange } from '../utils/airmanDisposalHelper';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
+import { getAvailableTrades } from '../utils/tradeList';
 interface LeaveRegisterViewProps {
   role?: UserRole;
   airmen: Airman[];
@@ -128,7 +129,13 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
   const isAdmin = session?.assignedRole === 'ADMIN';
   const adminFlight = session?.flightName;
   const todayStr = new Date().toISOString().split('T')[0];
+  const officeHasFlights = doesOfficeHaveFlights(airmen);
+  const tradesList = useMemo(
+    () => ['All', ...getAvailableTrades(airmen.map((a) => a.trade || ''))],
+    [airmen]
+  );
   const [selectedFlight, setSelectedFlight] = useState<FlightName | 'All'>(isAdmin && adminFlight ? adminFlight : 'All');
+  const [selectedTrade, setSelectedTrade] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedYear, setSelectedYear] = useState<string>(() => String(new Date().getFullYear()));
   const [summaryFilter, setSummaryFilter] = useState<'Casual' | 'Annual' | 'Recreation' | 'Total' | 'OnLeave' | null>(null);
@@ -139,6 +146,7 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
   // Grant / Record Leave Modal
   const [showGrantLeaveModal, setShowGrantLeaveModal] = useState<boolean>(false);
   const [grantLeaveFlight, setGrantLeaveFlight] = useState<FlightName>('Avionics');
+  const [grantLeaveTrade, setGrantLeaveTrade] = useState<string>('All');
   const [leaveAirmanId, setLeaveAirmanId] = useState<string>('');
   const [leaveType, setLeaveType] = useState<'Casual' | 'Annual' | 'Recreation' | 'Sick' | ''>('');
   const [leaveFromDate, setLeaveFromDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
@@ -185,11 +193,13 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
     });
   }, [leaveDurationDays]);
 
-  // Filter airmen for Grant Leave Modal (Strictly 4 flights: Avionics, Mechanics, GCS, Admin)
+  // Filter airmen for Grant Leave Modal
   const grantAirmenList = useMemo(() => {
-    const list = airmen.filter((a) => a.flightName === grantLeaveFlight);
+    const list = officeHasFlights
+      ? airmen.filter((a) => a.flightName === grantLeaveFlight)
+      : airmen.filter((a) => (grantLeaveTrade === 'All' ? true : a.trade === grantLeaveTrade));
     return sortAirmenBySeniority(list);
-  }, [airmen, grantLeaveFlight]);
+  }, [airmen, officeHasFlights, grantLeaveFlight, grantLeaveTrade]);
 
   // Reset airman selection when flight changes if the selected airman is not in the new flight
   useEffect(() => {
@@ -514,7 +524,8 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
 
   // Filter airmen
   const filteredAirmen = sortedAirmen.filter((a) => {
-    if (selectedFlight !== 'All' && a.flightName !== selectedFlight) return false;
+    if (officeHasFlights && selectedFlight !== 'All' && a.flightName !== selectedFlight) return false;
+    if (!officeHasFlights && selectedTrade !== 'All' && a.trade !== selectedTrade) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       const match =
@@ -694,22 +705,40 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
 
       {/* Filters Bar */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-3.5 shadow-xs flex flex-wrap items-center justify-between gap-3">
-        {/* Flight Tabs */}
-        <div className="flex items-center space-x-1.5 overflow-x-auto">
-          {(['All', 'Avionics', 'Mechanics', 'GCS', 'Admin'] as const).map((fl) => (
-            <button
-              key={fl}
-              onClick={() => setSelectedFlight(fl)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition-all shrink-0 ${
-                selectedFlight === fl
-                  ? 'bg-emerald-600 text-white shadow-xs'
-                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-              }`}
+        {officeHasFlights ? (
+          /* Flight Tabs */
+          <div className="flex items-center space-x-1.5 overflow-x-auto">
+            {(['All', 'Avionics', 'Mechanics', 'GCS', 'Admin'] as const).map((fl) => (
+              <button
+                key={fl}
+                onClick={() => setSelectedFlight(fl)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition-all shrink-0 ${
+                  selectedFlight === fl
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                }`}
+              >
+                {fl === 'All' ? 'All Flights' : `${fl} Flight`}
+              </button>
+            ))}
+          </div>
+        ) : (
+          /* Trade Filter (Replaces Flight Tabs when Office has no Flight) */
+          <div className="flex items-center space-x-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-1.5 text-xs">
+            <span className="text-slate-400 font-bold">Trade:</span>
+            <select
+              value={selectedTrade}
+              onChange={(e) => setSelectedTrade(e.target.value)}
+              className="bg-transparent font-black outline-none text-slate-900 dark:text-white cursor-pointer"
             >
-              {fl === 'All' ? 'All Flights' : `${fl} Flight`}
-            </button>
-          ))}
-        </div>
+              {tradesList.map((tr) => (
+                <option key={tr} value={tr} className="bg-white dark:bg-slate-900">
+                  {tr === 'All' ? 'All Trades' : tr}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Search */}
         <div className="relative w-full sm:w-64">
@@ -734,7 +763,7 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
                 <th className="py-3 px-4">BD No</th>
                 <th className="py-3 px-4">Rank</th>
                 <th className="py-3 px-4">Name</th>
-                <th className="py-3 px-4">Flight</th>
+                {officeHasFlights && <th className="py-3 px-4">Flight</th>}
                 <th className="py-3 px-4">Trade</th>
                 <th className="py-3 px-3 text-center bg-sky-50 dark:bg-sky-950/30 text-sky-900 dark:text-sky-300">
                   Casual Leave
@@ -808,9 +837,11 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
                           {airman.name}
                         </button>
                       </td>
-                      <td className="py-3 px-4 text-slate-600 dark:text-slate-400 font-semibold">
-                        {airman.flightName}
-                      </td>
+                      {officeHasFlights && (
+                        <td className="py-3 px-4 text-slate-600 dark:text-slate-400 font-semibold">
+                          {airman.flightName}
+                        </td>
+                      )}
                       <td className="py-3 px-4 text-slate-600 dark:text-slate-400">
                         {airman.trade}
                       </td>
@@ -911,36 +942,55 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
             )}
 
             <form onSubmit={handleGrantLeaveSubmit} className="space-y-4">
-              {/* Flight Filter Selector (Strictly 4 Flights) */}
-              <div>
-                <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
-                  Flight
-                </label>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[]).map((flt) => {
-                    const isSuperAdmin = ((session?.assignedRole === 'SUPER_ADMIN' || session?.assignedRole === 'OWNER') || session?.assignedRole === 'OWNER');
-                    const isPastDate = leaveFromDate < todayStr;
-                    const isDisabledFlt = (isAdmin && adminFlight && flt !== adminFlight) || (isPastDate && !isSuperAdmin);
-                    const setterStateValue = grantLeaveFlight === flt; // This is a bit hacky, let's just do an exact replace depending on the file
-                    return (
-                    <button
-                      key={flt}
-                      type="button"
-                      onClick={() => !isDisabledFlt && setGrantLeaveFlight(flt)}
-                      disabled={isDisabledFlt}
-                      className={`px-3 py-1.5 text-xs font-bold rounded-xl border transition-all ${
-                        isDisabledFlt ? 'opacity-50 cursor-not-allowed bg-slate-100 text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-600 dark:border-slate-700' :
-                        grantLeaveFlight === flt
-                          ? 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 border-slate-900 dark:border-slate-100 shadow-xs cursor-pointer'
-                          : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:border-slate-400 cursor-pointer'
-                      }`}
-                    >
-                      {flt}
-                    </button>
-                    );
-                  })}
+              {officeHasFlights ? (
+                /* Flight Filter Selector (Strictly 4 Flights) */
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                    Flight
+                  </label>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[]).map((flt) => {
+                      const isSuperAdmin = ((session?.assignedRole === 'SUPER_ADMIN' || session?.assignedRole === 'OWNER') || session?.assignedRole === 'OWNER');
+                      const isPastDate = leaveFromDate < todayStr;
+                      const isDisabledFlt = (isAdmin && adminFlight && flt !== adminFlight) || (isPastDate && !isSuperAdmin);
+                      return (
+                      <button
+                        key={flt}
+                        type="button"
+                        onClick={() => !isDisabledFlt && setGrantLeaveFlight(flt)}
+                        disabled={isDisabledFlt}
+                        className={`px-3 py-1.5 text-xs font-bold rounded-xl border transition-all ${
+                          isDisabledFlt ? 'opacity-50 cursor-not-allowed bg-slate-100 text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-600 dark:border-slate-700' :
+                          grantLeaveFlight === flt
+                            ? 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 border-slate-900 dark:border-slate-100 shadow-xs cursor-pointer'
+                            : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:border-slate-400 cursor-pointer'
+                        }`}
+                      >
+                        {flt}
+                      </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
+              ) : (
+                /* Trade Filter Selector when Office has no Flights */
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                    Filter by Trade
+                  </label>
+                  <select
+                    value={grantLeaveTrade}
+                    onChange={(e) => setGrantLeaveTrade(e.target.value)}
+                    className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-bold text-slate-900 dark:text-white outline-none"
+                  >
+                    {tradesList.map((tr) => (
+                      <option key={tr} value={tr}>
+                        {tr === 'All' ? 'All Trades' : tr}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Select Airman (Strictly Rank & Name only) */}
               <div>

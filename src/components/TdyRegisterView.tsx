@@ -9,7 +9,8 @@ import { getOptimalMinColumnWidth } from '../utils/tableUtils';
 import { EntryHistoryModal } from './EntryHistoryModal';
 import { getAirmanDisposalForRange } from '../utils/airmanDisposalHelper';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
+import { getAvailableTrades } from '../utils/tradeList';
 interface TdyRegisterViewProps {
   role?: UserRole;
   airmen: Airman[];
@@ -36,11 +37,14 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
   onViewProfile,
 }) => {
   const airmen = React.useMemo(() => rawAirmen.filter(a => a.active !== false), [rawAirmen]);
+  const hasFlights = React.useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
+  const availableTrades = React.useMemo(() => getAvailableTrades(airmen.map(a => a.trade || '')), [airmen]);
   const session = getCurrentUserSession();
   const isAdmin = session?.assignedRole === 'ADMIN';
   const adminFlight = session?.flightName;
   const todayStr = new Date().toISOString().split('T')[0];
   const [selectedFlight, setSelectedFlight] = useState<FlightName | 'All'>(isAdmin && adminFlight ? adminFlight : 'All');
+  const [selectedTrade, setSelectedTrade] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedYear, setSelectedYear] = useState<string>(() => String(new Date().getFullYear()));
   const [summaryFilter, setSummaryFilter] = useState<'OnTdy' | 'TotalTdy' | 'Available' | null>(null);
@@ -51,6 +55,7 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
   // Grant / Record TDY Modal
   const [showGrantTdyModal, setShowGrantTdyModal] = useState<boolean>(false);
   const [grantTdyFlight, setGrantTdyFlight] = useState<FlightName>('Avionics');
+  const [grantTdyTrade, setGrantTdyTrade] = useState<string>('All');
   const [tdyAirmanId, setTdyAirmanId] = useState<string>('');
   const [tdyDestination, setTdyDestination] = useState<string>('');
   const [tdyCustomDestination, setTdyCustomDestination] = useState<string>('');
@@ -76,17 +81,18 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
     }
   }, [tdyFromDate, tdyToDate]);
 
-  // Filter airmen for Grant TDY Modal (Strictly 4 flights: Avionics, Mechanics, GCS, Admin)
+  // Filter airmen for Grant TDY Modal
   const grantAirmenList = useMemo(() => {
-    const list = airmen.filter((a) => a.flightName === grantTdyFlight);
+    const list = hasFlights
+      ? airmen.filter((a) => a.flightName === grantTdyFlight)
+      : (grantTdyTrade === 'All' ? airmen : airmen.filter((a) => (a.trade || '').trim() === grantTdyTrade));
     return sortAirmenBySeniority(list);
-  }, [airmen, grantTdyFlight]);
+  }, [airmen, grantTdyFlight, grantTdyTrade, hasFlights]);
 
   // Selection is now multiple and defaults to none.
   useEffect(() => {
-    // Reset selection if flight changes (optional, but good UX)
     setTdyAirmanId('');
-  }, [grantTdyFlight]);
+  }, [grantTdyFlight, grantTdyTrade]);
 
   // Apply preset duration
   const applyPresetDays = (days: number) => {
@@ -280,7 +286,11 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
 
   // Filter airmen
   const filteredAirmen = sortedAirmen.filter((a) => {
-    if (selectedFlight !== 'All' && a.flightName !== selectedFlight) return false;
+    if (hasFlights) {
+      if (selectedFlight !== 'All' && a.flightName !== selectedFlight) return false;
+    } else {
+      if (selectedTrade !== 'All' && (a.trade || '').trim() !== selectedTrade) return false;
+    }
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       const match =
@@ -413,29 +423,44 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
         </div>
       </div>
 
-      {/* Flight Filter + Search Toolbar */}
+      {/* Flight / Trade Filter + Search Toolbar */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-4">
-        {/* Flight Pills */}
-        <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto">
-          {(['All', 'Avionics', 'Mechanics', 'GCS', 'Admin'] as (FlightName | 'All')[]).map((fl) => {
-            const isDisabledFlt = isAdmin && adminFlight && fl !== adminFlight;
-            return (
-            <button
-              key={fl}
-              onClick={() => !isDisabledFlt && setSelectedFlight(fl)}
-              disabled={isDisabledFlt}
-              className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition-all shrink-0 ${
-                isDisabledFlt ? 'opacity-50 cursor-not-allowed bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-600' :
-                selectedFlight === fl
-                  ? 'bg-emerald-600 text-white shadow-xs cursor-pointer'
-                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 cursor-pointer'
-              }`}
+        {hasFlights ? (
+          <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto">
+            {(['All', 'Avionics', 'Mechanics', 'GCS', 'Admin'] as (FlightName | 'All')[]).map((fl) => {
+              const isDisabledFlt = isAdmin && adminFlight && fl !== adminFlight;
+              return (
+              <button
+                key={fl}
+                onClick={() => !isDisabledFlt && setSelectedFlight(fl)}
+                disabled={isDisabledFlt}
+                className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition-all shrink-0 ${
+                  isDisabledFlt ? 'opacity-50 cursor-not-allowed bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-600' :
+                  selectedFlight === fl
+                    ? 'bg-emerald-600 text-white shadow-xs cursor-pointer'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 cursor-pointer'
+                }`}
+              >
+                {fl === 'All' ? 'All Flights' : `${fl} Flight`}
+              </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="flex items-center space-x-2 w-full sm:w-auto">
+            <span className="text-xs font-bold text-slate-500 dark:text-slate-400">Filter by Trade:</span>
+            <select
+              value={selectedTrade}
+              onChange={(e) => setSelectedTrade(e.target.value)}
+              className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-extrabold text-slate-800 dark:text-slate-100 outline-none cursor-pointer"
             >
-              {fl === 'All' ? 'All Flights' : `${fl} Flight`}
-            </button>
-            );
-          })}
-        </div>
+              <option value="All">All Trades</option>
+              {availableTrades.map((tr) => (
+                <option key={tr} value={tr}>{tr}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Search */}
         <div className="relative w-full sm:w-64">
@@ -460,7 +485,7 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
                 <th className="py-3 px-4">BD No</th>
                 <th className="py-3 px-4">Rank</th>
                 <th className="py-3 px-4">Name</th>
-                <th className="py-3 px-4">Flight</th>
+                {hasFlights && <th className="py-3 px-4">Flight</th>}
                 <th className="py-3 px-4">Trade</th>
                 <th className="py-3 px-3 text-center bg-emerald-50 dark:bg-emerald-950/30 text-emerald-900 dark:text-emerald-300 font-black">
                   Total TDY Days ({selectedYear})
@@ -519,9 +544,11 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
                           {airman.name}
                         </button>
                       </td>
-                      <td className="py-3 px-4 text-slate-600 dark:text-slate-400 font-semibold">
-                        {airman.flightName}
-                      </td>
+                      {hasFlights && (
+                        <td className="py-3 px-4 text-slate-600 dark:text-slate-400 font-semibold">
+                          {airman.flightName}
+                        </td>
+                      )}
                       <td className="py-3 px-4 text-slate-600 dark:text-slate-400">
                         {airman.trade}
                       </td>
@@ -589,36 +616,53 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
             )}
 
             <form onSubmit={handleGrantTdySubmit} className="space-y-4">
-              {/* Flight Selector (Strictly 4 Flights) */}
-              <div>
-                <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
-                  Flight
-                </label>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[]).map((flt) => {
-                    const isSuperAdmin = ((session?.assignedRole === 'SUPER_ADMIN' || session?.assignedRole === 'OWNER') || session?.assignedRole === 'OWNER');
-                    const isPastDate = tdyFromDate < todayStr;
-                    const isDisabledFlt = (isAdmin && adminFlight && flt !== adminFlight) || (isPastDate && !isSuperAdmin);
-                    const setterStateValue = grantTdyFlight === flt; // This is a bit hacky, let's just do an exact replace depending on the file
-                    return (
-                    <button
-                      key={flt}
-                      type="button"
-                      onClick={() => !isDisabledFlt && setGrantTdyFlight(flt)}
-                      disabled={isDisabledFlt}
-                      className={`px-3 py-1.5 text-xs font-bold rounded-xl border transition-all ${
-                        isDisabledFlt ? 'opacity-50 cursor-not-allowed bg-slate-100 text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-600 dark:border-slate-700' :
-                        grantTdyFlight === flt
-                          ? 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 border-slate-900 dark:border-slate-100 shadow-xs cursor-pointer'
-                          : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:border-slate-400 cursor-pointer'
-                      }`}
-                    >
-                      {flt}
-                    </button>
-                    );
-                  })}
+              {/* Flight or Trade Selector */}
+              {hasFlights ? (
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                    Flight
+                  </label>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[]).map((flt) => {
+                      const isSuperAdmin = ((session?.assignedRole === 'SUPER_ADMIN' || session?.assignedRole === 'OWNER') || session?.assignedRole === 'OWNER');
+                      const isPastDate = tdyFromDate < todayStr;
+                      const isDisabledFlt = (isAdmin && adminFlight && flt !== adminFlight) || (isPastDate && !isSuperAdmin);
+                      return (
+                      <button
+                        key={flt}
+                        type="button"
+                        onClick={() => !isDisabledFlt && setGrantTdyFlight(flt)}
+                        disabled={isDisabledFlt}
+                        className={`px-3 py-1.5 text-xs font-bold rounded-xl border transition-all ${
+                          isDisabledFlt ? 'opacity-50 cursor-not-allowed bg-slate-100 text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-600 dark:border-slate-700' :
+                          grantTdyFlight === flt
+                            ? 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 border-slate-900 dark:border-slate-100 shadow-xs cursor-pointer'
+                            : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:border-slate-400 cursor-pointer'
+                        }`}
+                      >
+                        {flt}
+                      </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                    Filter by Trade
+                  </label>
+                  <select
+                    value={grantTdyTrade}
+                    onChange={(e) => setGrantTdyTrade(e.target.value)}
+                    className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-slate-900 dark:text-white outline-none cursor-pointer"
+                  >
+                    <option value="All">All Trades</option>
+                    {availableTrades.map((tr) => (
+                      <option key={tr} value={tr}>{tr}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Select Airman */}
               <div>
@@ -627,7 +671,7 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
                     Select Airman
                   </label>
                   <span className="text-[11px] text-slate-400 font-semibold">
-                    {grantAirmenList.length} Airmen in {grantTdyFlight}
+                    {grantAirmenList.length} Airmen {hasFlights ? `in ${grantTdyFlight}` : (grantTdyTrade === 'All' ? 'Total' : `in ${grantTdyTrade}`)}
                   </span>
                 </div>
                 

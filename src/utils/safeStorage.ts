@@ -176,6 +176,8 @@ const GLOBAL_UNSCOPED_STORAGE_KEYS = new Set<string>([
   'custom_office_config',
   'baf_custom_office_firebase_config_v1',
   'baf_master_registered_offices_cache',
+  'baf_global_user_office_map_v1',
+  'baf_pending_office_requests_v1',
   'baf_theme_pref',
   'theme',
   'baf_force_apk_mode',
@@ -193,6 +195,32 @@ const GLOBAL_UNSCOPED_STORAGE_KEYS = new Set<string>([
   'canteen_sync_logs',
   'canteen_last_handled_sync_revision',
 ]);
+
+let rawStorageGetItemRef: ((key: string) => string | null) | null = null;
+let rawStorageSetItemRef: ((key: string, value: string) => void) | null = null;
+
+export function getRawLocalStorageItem(key: string): string | null {
+  if (typeof window === 'undefined' || !window.localStorage) return null;
+  try {
+    if (rawStorageGetItemRef) {
+      return rawStorageGetItemRef.call(window.localStorage, key);
+    }
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export function setRawLocalStorageItem(key: string, value: string): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    if (rawStorageSetItemRef) {
+      rawStorageSetItemRef.call(window.localStorage, key, value);
+    } else {
+      window.localStorage.setItem(key, value);
+    }
+  } catch {}
+}
 
 function resolveOfficeScopedStorageKey(
   rawGetItem: (key: string) => string | null,
@@ -245,6 +273,9 @@ export function installSafeStorageProtection(): void {
   const originalStorageSetItem = Storage.prototype.setItem;
   const originalStorageGetItem = Storage.prototype.getItem;
   const originalStorageRemoveItem = Storage.prototype.removeItem;
+
+  rawStorageGetItemRef = originalStorageGetItem;
+  rawStorageSetItemRef = originalStorageSetItem;
 
   Storage.prototype.getItem = function (this: Storage, key: string): string | null {
     const effectiveKey =

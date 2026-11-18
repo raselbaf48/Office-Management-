@@ -36,7 +36,7 @@ import {
 } from 'lucide-react';
 import { UserRole } from '../types';
 import { UserSession } from '../utils/authSession';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
 
 export type SidebarTab =
   | 'overview'
@@ -319,14 +319,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     isMobileDrawer
                   )}
 
-                  {renderNavButton(
-                    'flights',
-                    <Building2 className="w-4 h-4 shrink-0" />,
-                    'Flights & Sections',
-                    'Flight Structure (Avionics, Mechanics, GCS, Admin)',
-                    undefined,
-                    isMobileDrawer
-                  )}
+                  {doesOfficeHaveFlights() &&
+                    renderNavButton(
+                      'flights',
+                      <Building2 className="w-4 h-4 shrink-0" />,
+                      'Flights & Sections',
+                      'Flight Structure (Avionics, Mechanics, GCS, Admin)',
+                      undefined,
+                      isMobileDrawer
+                    )}
                 </motion.div>
               )}
             </AnimatePresence>
@@ -409,7 +410,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
                   className={isCollapsed ? 'space-y-1.5' : 'mt-1.5 space-y-1.5 overflow-hidden'}
                 >
-                  {renderNavButton('ida-center', <Shield className="w-4 h-4 shrink-0" />, 'IDA Center Duty', 'IDA Center Duty (Standby & Shifts)', undefined, isMobileDrawer)}
                   {renderNavButton('duty-roster', <FileText className="w-4 h-4 shrink-0" />, 'Duty Roster', 'Duty Roster Period & Export', undefined, isMobileDrawer)}
                 </motion.div>
               )}
@@ -456,8 +456,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <div className="text-xs font-bold text-slate-900 dark:text-white truncate">
                     {userSession.rank} {userSession.name}
                   </div>
-                  <div className="text-[10px] font-mono text-slate-500 dark:text-emerald-300/80">
-                    {userSession.bdNo} • {userSession.flightName}
+                  <div className="text-[10px] font-mono text-slate-500 dark:text-emerald-300/80 truncate">
+                    {userSession.bdNo}
+                    {doesOfficeHaveFlights() && userSession.flightName
+                      ? ` • ${userSession.flightName}`
+                      : userSession.trade
+                      ? ` • ${userSession.trade}`
+                      : ''}
                   </div>
                 </div>
               </div>

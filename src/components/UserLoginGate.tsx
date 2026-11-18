@@ -1,7 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Airman, DetailedUserLogin, Rank, FlightName } from '../types';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Airman, DetailedUserLogin, Rank, FlightName, UserRole } from '../types';
 import { Logo155UASU } from './Logo155UASU';
-import { OfficeSetupPortal } from './OfficeSetupPortal';
 import { AppOwnerMasterPortal } from './AppOwnerMasterPortal';
 import {
   X,
@@ -11,6 +10,7 @@ import {
   Lock,
   LogIn,
   ChevronRight,
+  ChevronLeft,
   Eye,
   EyeOff,
   Loader2,
@@ -19,19 +19,39 @@ import {
   Sun,
   Moon,
   Monitor,
-  Settings,
   UserPlus,
   ArrowLeft,
+  Building2,
+  Upload,
+  Clock,
+  Send,
+  UserCheck,
+  Phone,
+  Briefcase,
+  Award,
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { getAppConfig, isFeatureActive } from '../utils/appConfig';
 import { useGlobalTheme } from '../utils/themeManager';
 import {
-  hasCustomOfficeConfig,
   getActiveOfficeIdentity,
+  findOfficeByUserId,
+  activateMatchedOfficeForUser,
+  syncGlobalUserOfficeMapFromCloud,
+  registerUsersInGlobalOfficeDirectory,
+  saveCustomOfficeConfig,
+  updateActiveOfficeProfile,
+  clearCustomOfficeConfig,
+  fetchRegisteredOfficesFromMaster,
+  RegisteredOfficeRecord,
+  submitOfficeRegistrationRequest,
+  fetchPendingOfficeRequestsFromMaster,
+  getPendingOfficeRequestsLocal,
+  PendingOfficeRegistrationRequest,
+  isOfficeNameAlreadyRegistered,
 } from '../firebase';
 import { localDb } from '../services/localDatabase';
-import { pushUserProfilesToFirebase } from '../services/firebaseFirestoreService';
+import { getAvailableTrades, addCustomTradeToList } from '../utils/tradeList';
 
 import { AppUpdateModal } from './AppUpdateModal';
 
@@ -42,6 +62,8 @@ import {
   saveDetailedUsers,
   isMasterPinMatch,
   MASTER_OWNER_USER_ID,
+  provisionMasterOwnerInOffice,
+  loginAsMasterOwnerSession,
 } from '../utils/authSession';
 import {
   checkForAppUpdate,
@@ -53,9 +75,7 @@ import {
 import {
   setLastUsedPortal,
   PortalType,
-  getLastUsedIdForPortal,
   saveLastUsedIdForPortal,
-  syncLastUsedIdsFromCloud,
 } from '../services/portalPreferenceService';
 
 interface UserLoginGateProps {
@@ -70,31 +90,79 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const { themePreference, setThemePreference } = useGlobalTheme();
   const activeTab: PortalType = 'Office';
 
-  // Multi-Office Configuration & Secret Master Portal States
-  const [isOfficeConfigured, setIsOfficeConfigured] = useState<boolean>(() =>
-    hasCustomOfficeConfig()
-  );
-  const [showSetupWizard, setShowSetupWizard] = useState<boolean>(false);
+  // Multi-Office Identity & Secret Master Portal States
   const [officeIdentity, setOfficeIdentity] = useState(() => getActiveOfficeIdentity());
+  const [directoryTick, setDirectoryTick] = useState<number>(0);
   const [isMasterPortalOpen, setIsMasterPortalOpen] = useState<boolean>(false);
   const logoClickTimestampsRef = useRef<number[]>([]);
 
+  // Master User ID Office List & Pending Approval Requests
+  const [registeredOffices, setRegisteredOffices] = useState<RegisteredOfficeRecord[]>([]);
+  const [selectedMasterOfficeId, setSelectedMasterOfficeId] = useState<string>('');
+  const [pendingOfficeRequests, setPendingOfficeRequests] = useState<PendingOfficeRegistrationRequest[]>(() =>
+    getPendingOfficeRequestsLocal()
+  );
+
+  const loadOfficesAndPendingRequests = async () => {
+    try {
+      const [offices, requests] = await Promise.all([
+        fetchRegisteredOfficesFromMaster(),
+        fetchPendingOfficeRequestsFromMaster(),
+      ]);
+      setRegisteredOffices(offices);
+      setPendingOfficeRequests(requests);
+      setSelectedMasterOfficeId((prev) => {
+        if (prev && offices.some((o) => (o.officeCode || o.projectId) === prev)) {
+          return prev;
+        }
+        const activeId = getActiveOfficeIdentity();
+        const currentMatch = offices.find(
+          (o) =>
+            (o.officeCode || o.projectId || '').toUpperCase() === (activeId.officeCode || '').toUpperCase() ||
+            o.officeName.toUpperCase() === activeId.officeName.toUpperCase()
+        );
+        return currentMatch?.officeCode || currentMatch?.projectId || offices[0]?.officeCode || offices[0]?.projectId || '155-UASU';
+      });
+    } catch {}
+  };
+
   useEffect(() => {
+    loadOfficesAndPendingRequests();
     const syncConfigState = () => {
-      setIsOfficeConfigured(hasCustomOfficeConfig());
       setOfficeIdentity(getActiveOfficeIdentity());
+      setDirectoryTick((t) => t + 1);
+      setPendingOfficeRequests(getPendingOfficeRequestsLocal());
+    };
+    const handlePendingRequestsUpdated = () => {
+      setPendingOfficeRequests(getPendingOfficeRequestsLocal());
     };
     window.addEventListener('baf_office_config_changed', syncConfigState);
+    window.addEventListener('baf_pending_office_requests_updated', handlePendingRequestsUpdated);
     window.addEventListener('baf_logo_updated', syncConfigState);
     window.addEventListener('baf_settings_updated', syncConfigState);
     window.addEventListener('storage', syncConfigState);
     return () => {
       window.removeEventListener('baf_office_config_changed', syncConfigState);
+      window.removeEventListener('baf_pending_office_requests_updated', handlePendingRequestsUpdated);
       window.removeEventListener('baf_logo_updated', syncConfigState);
       window.removeEventListener('baf_settings_updated', syncConfigState);
       window.removeEventListener('storage', syncConfigState);
     };
   }, []);
+
+  // Ensure current office users and cloud user-office directory are indexed for instant BD No -> Office matching
+  useEffect(() => {
+    try {
+      const currentUsers = getDetailedUsers(airmen);
+      registerUsersInGlobalOfficeDirectory(currentUsers);
+      setDirectoryTick((t) => t + 1);
+    } catch {}
+    syncGlobalUserOfficeMapFromCloud()
+      .then(() => {
+        setDirectoryTick((t) => t + 1);
+      })
+      .catch(() => {});
+  }, [airmen]);
 
   // Secret 5-clicks within 3 seconds trigger on Office Emblem/Logo
   const handleLogoSecretClick = () => {
@@ -109,11 +177,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     }
   };
 
-  const [bdInput, setBdInput] = useState(() => {
-    try {
-      return (getLastUsedIdForPortal('Office') || '').replace(/[^0-9]/g, '');
-    } catch { return ''; }
-  });
+  // Start with empty User ID so "Office Management" is shown by default when no User ID is entered
+  const [bdInput, setBdInput] = useState<string>('');
   const [passwordInput, setPasswordInput] = useState('');
   const [showPin, setShowPin] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>('');
@@ -125,16 +190,114 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const [isPasswordFocused, setIsPasswordFocused] = useState<boolean>(false);
   const [isConfirmFocused, setIsConfirmFocused] = useState<boolean>(false);
 
-  // User Registration Mode States
+  // 4-Step "Register a New Office" Wizard States
+  // Step 1: Office Information | Step 2: User Information (6 Boxed Fields) | Step 3: Submit for Approval | Step 4: Submitted Confirmation
+  // All boxes start completely empty (no pre-filled values) and use floating labels like the Login Portal
   const [isRegisterMode, setIsRegisterMode] = useState<boolean>(false);
+  const [registerStep, setRegisterStep] = useState<1 | 2 | 3 | 4>(1);
+  const [focusedRegField, setFocusedRegField] = useState<string | null>(null);
+  // Step 1: Office Info (all empty by default)
   const [regUnit, setRegUnit] = useState<string>('');
-  const [regWing, setRegWing] = useState<string>('');
-  const [regRank, setRegRank] = useState<string>('');
+  const [regBase, setRegBase] = useState<string>('');
+  const [regSlogan, setRegSlogan] = useState<string>('');
+  const [regLogo, setRegLogo] = useState<string>('/155-uasu-baf-logo.png');
+  // Step 2: User Info (ONLY the 6 requested fields, all empty by default)
   const [regBdNo, setRegBdNo] = useState<string>('');
-  const [regName, setRegName] = useState<string>('');
+  const [regFullName, setRegFullName] = useState<string>('');
+  const [regSurname, setRegSurname] = useState<string>('');
   const [regTrade, setRegTrade] = useState<string>('');
-  const [regFlight, setRegFlight] = useState<string>('');
+  const [regCustomTrade, setRegCustomTrade] = useState<string>('');
+  const [availableTrades, setAvailableTrades] = useState<string[]>(() => getAvailableTrades());
+  const [regUserRole, setRegUserRole] = useState<string>('');
+  const [regContactNo, setRegContactNo] = useState<string>('');
   const [isRegistering, setIsRegistering] = useState<boolean>(false);
+  const [submittedRequestRecord, setSubmittedRequestRecord] = useState<PendingOfficeRegistrationRequest | null>(null);
+  const logoInputRef = useRef<HTMLInputElement>(null);
+
+  const cleanTypedBd = useMemo(
+    () => bdInput.replace(/^BD\/?/i, '').replace(/[^0-9]/g, '').trim(),
+    [bdInput]
+  );
+
+  const isMasterUserTyped = cleanTypedBd === MASTER_OWNER_USER_ID;
+
+  const selectedMasterOffice = useMemo(() => {
+    if (!registeredOffices.length) return null;
+    return (
+      registeredOffices.find(
+        (o) => (o.officeCode || o.projectId) === selectedMasterOfficeId
+      ) || registeredOffices[0]
+    );
+  }, [registeredOffices, selectedMasterOfficeId]);
+
+  // Live BD No -> Office Lookup: Whichever Office matches the typed BD No appears at the top of the Login Portal
+  const matchedUserOffice = useMemo(() => {
+    if (!cleanTypedBd || isMasterUserTyped) return null;
+    return findOfficeByUserId(cleanTypedBd, airmen);
+  }, [cleanTypedBd, isMasterUserTyped, airmen, directoryTick]);
+
+  // Check if typed BD No has a Pending Office Registration Request
+  const matchedPendingRequest = useMemo(() => {
+    if (!cleanTypedBd || isMasterUserTyped) return null;
+    return (
+      pendingOfficeRequests.find(
+        (r) =>
+          r.status === 'PENDING' &&
+          r.bdNo.replace(/^BD\/?/i, '').replace(/[^0-9]/g, '').trim() === cleanTypedBd
+      ) || null
+    );
+  }, [cleanTypedBd, isMasterUserTyped, pendingOfficeRequests]);
+
+  const pendingRequestsCount = useMemo(
+    () => pendingOfficeRequests.filter((r) => r.status === 'PENDING').length,
+    [pendingOfficeRequests]
+  );
+
+  // Header Display Rules:
+  // 1. If no User ID is typed (or no office matched yet): display "Office Management"
+  // 2. If Master User ID (48456) is typed: display the selected office from the Office List
+  // 3. If a regular User ID is typed and matches an office: display that office's name, logo, base, and slogan
+  const displayedOfficeName = useMemo(() => {
+    if (!cleanTypedBd) return 'Office Management';
+    if (isMasterUserTyped) {
+      return selectedMasterOffice?.officeName || 'Office Management';
+    }
+    if (matchedUserOffice) {
+      return matchedUserOffice.officeName;
+    }
+    if (matchedPendingRequest) {
+      return matchedPendingRequest.officeName;
+    }
+    return 'Office Management';
+  }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
+
+  const displayedOfficeLogo = useMemo(() => {
+    if (!cleanTypedBd) return '/155-uasu-baf-logo.png';
+    if (isMasterUserTyped) {
+      return selectedMasterOffice?.officeLogo || '/155-uasu-baf-logo.png';
+    }
+    if (matchedUserOffice?.officeLogo) {
+      return matchedUserOffice.officeLogo;
+    }
+    if (matchedPendingRequest?.officeLogo) {
+      return matchedPendingRequest.officeLogo;
+    }
+    return '/155-uasu-baf-logo.png';
+  }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
+
+  const displayedOfficeSubtitle = useMemo(() => {
+    if (!cleanTypedBd) return 'Centralized Multi-Office Management System';
+    if (isMasterUserTyped && selectedMasterOffice) {
+      return `${selectedMasterOffice.officeBase || 'BAF BASE ZHR'} • ${selectedMasterOffice.officeSlogan || 'Master Office Selection'}`;
+    }
+    if (matchedUserOffice) {
+      return `${matchedUserOffice.officeBase || 'BAF BASE ZHR'} • ${matchedUserOffice.officeSlogan || 'Intel • Surveillance • Strike'}`;
+    }
+    if (matchedPendingRequest) {
+      return `${matchedPendingRequest.officeBase || 'BAF BASE ZHR'} • Pending Master Admin Approval`;
+    }
+    return 'Enter your registered BD No to detect your Office';
+  }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
 
   const [officeRecentLogins, setOfficeRecentLogins] = useState<string[]>(() => {
     try {
@@ -149,7 +312,6 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const [appVersionInfo, setAppVersionInfo] = useState<{ versionCode: number; versionName: string }>(DEFAULT_CURRENT_APP);
 
   useEffect(() => {
-    // Strictly do NOT check or show update modal on Website (only in installed APK)
     if (!isRunningInApk()) return;
 
     let isMounted = true;
@@ -174,18 +336,10 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     };
   }, []);
 
-  useEffect(() => {
-    syncLastUsedIdsFromCloud().then((ids) => {
-      if (ids.officeId) {
-        setBdInput((prev) => prev || (ids.officeId || '').replace(/[^0-9]/g, ''));
-      }
-    });
-  }, []);
-
   const recentLogins = officeRecentLogins;
 
   const removeRecent = (id: string) => {
-    const updated = officeRecentLogins.filter(x => x !== id);
+    const updated = officeRecentLogins.filter((x) => x !== id);
     setOfficeRecentLogins(updated);
     localStorage.setItem('baf_recent_logins', JSON.stringify(updated));
   };
@@ -199,16 +353,16 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const [newPass, setNewPass] = useState('');
   const [confirmPass, setConfirmPass] = useState('');
   const [targetAirman, setTargetAirman] = useState<Airman | null>(null);
-  
+
   const loginPinRef = useRef<HTMLFormElement>(null);
   const resetPinRef = useRef<HTMLDivElement>(null);
   const confirmPinRef = useRef<HTMLDivElement>(null);
   const lastAutoLoginPin = useRef<string>('');
 
-  // Reset auto-login flag when bdInput changes
+  // Reset auto-login flag when bdInput or selectedMasterOfficeId changes
   useEffect(() => {
     lastAutoLoginPin.current = '';
-  }, [bdInput]);
+  }, [bdInput, selectedMasterOfficeId]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -227,9 +381,50 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Auto Login Check: Auto logs in as soon as the manually entered PIN matches
+  // Activate selected office workspace when Master User ID (48456) logs in
+  const activateSelectedMasterOffice = async (office: RegisteredOfficeRecord | null) => {
+    if (!office) return;
+    const code = String(office.officeCode || office.firebaseConfig?.officeCode || office.projectId || '').toUpperCase().trim();
+    const isDefault155 =
+      code === '155-UASU' ||
+      code === '155UASU' ||
+      office.officeName.toUpperCase().includes('155 UASU');
+
+    if (isDefault155) {
+      clearCustomOfficeConfig();
+      try {
+        localDb.switchActiveOfficeWorkspace(false);
+      } catch {}
+    } else if (office.firebaseConfig) {
+      saveCustomOfficeConfig(
+        {
+          officeName: office.officeName,
+          officeLogo: office.officeLogo || '/155-uasu-baf-logo.png',
+          officeSlogan: office.officeSlogan || 'Intel • Surveillance • Strike',
+          officeBase: office.officeBase || 'BAF BASE ZHR',
+          officeCode: code,
+          firebaseConfig: office.firebaseConfig,
+          configuredAt: new Date().toISOString(),
+          adminUserId: MASTER_OWNER_USER_ID,
+        },
+        { isBrandNew: false }
+      );
+      updateActiveOfficeProfile({
+        officeName: office.officeName,
+        officeLogo: office.officeLogo || '/155-uasu-baf-logo.png',
+        officeSlogan: office.officeSlogan || 'Intel • Surveillance • Strike',
+        officeBase: office.officeBase || 'BAF BASE ZHR',
+      });
+      try {
+        localDb.switchActiveOfficeWorkspace(false);
+      } catch {}
+    }
+    setOfficeIdentity(getActiveOfficeIdentity());
+  };
+
+  // Auto Login Check: Auto logs in as soon as the manually entered PIN matches the user's office account
   useEffect(() => {
-    if (passwordInput.length > 0 && bdInput.trim().length > 0 && !isLoading && !successAirman && !isResetMode) {
+    if (passwordInput.length > 0 && bdInput.trim().length > 0 && !isLoading && !successAirman && !isResetMode && !isRegisterMode) {
       if (passwordInput === lastAutoLoginPin.current) return;
 
       const cleanInput = bdInput.replace(/^BD\/?/i, '').replace(/\s+/g, '').trim().toLowerCase();
@@ -242,41 +437,64 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         return;
       }
 
-      const detailedUsers = getDetailedUsers(airmen);
-      const matchedDetail = detailedUsers.find((u) => {
-        const uBd = (u.bdNo || '').trim().toLowerCase();
-        const uBdClean = uBd.replace(/^BD\/?/i, '').replace(/\s+/g, '');
-        const uDigits = uBd.replace(/\D/g, '');
-        return uBd === cleanInput || uBdClean === cleanInput || (cleanDigits && uDigits === cleanDigits);
-      });
-      
-      let isMatch = false;
-      if (matchedDetail) {
-        const expectedPassword = (matchedDetail.pin || matchedDetail.password || matchedDetail.bdNo || '').toString().trim();
-        const cleanExpectedPassword = expectedPassword.replace(/^BD\/?/i, '').replace(/\s+/g, '').trim();
-        const cleanExpectedDigits = expectedPassword.replace(/\D/g, '');
-        const adminPass = (matchedDetail.adminPass || '1124').toString().trim();
+      // Do not auto-login if user's office is still pending approval
+      if (matchedPendingRequest && !matchedUserOffice) {
+        return;
+      }
 
-        isMatch = 
-          passwordInput === expectedPassword ||
-          passwordInput.toLowerCase() === expectedPassword.toLowerCase() ||
-          passwordInput === cleanExpectedPassword ||
+      let isMatch = false;
+
+      // 1. Check matchedUserOffice from Global Multi-Office Directory first
+      if (matchedUserOffice) {
+        const expectedPin = String(matchedUserOffice.pin || matchedUserOffice.bdNo || '').trim();
+        const cleanExpectedDigits = expectedPin.replace(/\D/g, '');
+        if (
+          passwordInput === expectedPin ||
           (cleanExpectedDigits && passwordInput === cleanExpectedDigits) ||
-          passwordInput === adminPass ||
-          passwordInput === '1124';
-      } else {
-        const matchedAirman = airmen.find((a) => {
-          const aBd = (a.bdNo || '').trim().replace(/^BD\/?/i, '').replace(/\s+/g, '').toLowerCase();
-          const aDigits = (a.bdNo || '').replace(/\D/g, '');
-          return aBd === cleanInput || (cleanDigits && aDigits === cleanDigits);
+          (cleanDigits && passwordInput === cleanDigits) ||
+          passwordInput === '1124'
+        ) {
+          isMatch = true;
+        }
+      }
+
+      // 2. Check active office detailedUsers & airmen
+      if (!isMatch) {
+        const detailedUsers = getDetailedUsers(airmen);
+        const matchedDetail = detailedUsers.find((u) => {
+          const uBd = (u.bdNo || '').trim().toLowerCase();
+          const uBdClean = uBd.replace(/^BD\/?/i, '').replace(/\s+/g, '');
+          const uDigits = uBd.replace(/\D/g, '');
+          return uBd === cleanInput || uBdClean === cleanInput || (cleanDigits && uDigits === cleanDigits);
         });
-        if (matchedAirman) {
-          const aCleanBd = (matchedAirman.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase();
-          const aDigits = (matchedAirman.bdNo || '').replace(/\D/g, '');
-          isMatch = 
-            passwordInput.toLowerCase() === aCleanBd ||
-            (aDigits && passwordInput === aDigits) ||
+
+        if (matchedDetail) {
+          const expectedPassword = (matchedDetail.pin || matchedDetail.password || matchedDetail.bdNo || '').toString().trim();
+          const cleanExpectedPassword = expectedPassword.replace(/^BD\/?/i, '').replace(/\s+/g, '').trim();
+          const cleanExpectedDigits = expectedPassword.replace(/\D/g, '');
+          const adminPass = (matchedDetail.adminPass || '1124').toString().trim();
+
+          isMatch =
+            passwordInput === expectedPassword ||
+            passwordInput.toLowerCase() === expectedPassword.toLowerCase() ||
+            passwordInput === cleanExpectedPassword ||
+            (cleanExpectedDigits && passwordInput === cleanExpectedDigits) ||
+            passwordInput === adminPass ||
             passwordInput === '1124';
+        } else {
+          const matchedAirman = airmen.find((a) => {
+            const aBd = (a.bdNo || '').trim().replace(/^BD\/?/i, '').replace(/\s+/g, '').toLowerCase();
+            const aDigits = (a.bdNo || '').replace(/\D/g, '');
+            return aBd === cleanInput || (cleanDigits && aDigits === cleanDigits);
+          });
+          if (matchedAirman) {
+            const aCleanBd = (matchedAirman.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase();
+            const aDigits = (matchedAirman.bdNo || '').replace(/\D/g, '');
+            isMatch =
+              passwordInput.toLowerCase() === aCleanBd ||
+              (aDigits && passwordInput === aDigits) ||
+              passwordInput === '1124';
+          }
         }
       }
 
@@ -285,7 +503,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         handleSubmit({ preventDefault: () => {} } as React.FormEvent);
       }
     }
-  }, [passwordInput, bdInput, isLoading, successAirman, isResetMode, airmen]);
+  }, [passwordInput, bdInput, isLoading, successAirman, isResetMode, isRegisterMode, airmen, matchedUserOffice, matchedPendingRequest, selectedMasterOffice]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -303,8 +521,77 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       return;
     }
 
+    // Check if this User ID has a pending office registration request that hasn't been approved yet
+    if (matchedPendingRequest && !matchedUserOffice && cleanInput !== MASTER_OWNER_USER_ID) {
+      setErrorMsg(
+        `Your registration for "${matchedPendingRequest.officeName}" is awaiting approval in the Master Admin Panel.`
+      );
+      return;
+    }
+
     setIsLoading(true);
-    const validation = await validateUserLogin(cleanInput, passwordInput, airmen);
+
+    // Master User ID (48456) Office Selection Login
+    if (cleanInput === MASTER_OWNER_USER_ID) {
+      if (!isMasterPinMatch(cleanPin)) {
+        setErrorMsg('Invalid Master PIN.');
+        setPasswordInput('');
+        setIsLoading(false);
+        return;
+      }
+
+      await activateSelectedMasterOffice(selectedMasterOffice);
+      const targetAirmen = (() => {
+        try {
+          return localDb.getAirmen() || airmen;
+        } catch {
+          return airmen;
+        }
+      })();
+      await provisionMasterOwnerInOffice(targetAirmen);
+      loginAsMasterOwnerSession();
+      setLastUsedPortal(activeTab);
+
+      setSuccessAirman({
+        id: 'master-owner-48456',
+        bdNo: MASTER_OWNER_USER_ID,
+        rank: 'System',
+        name: 'Master Admin',
+        fullName: 'App Owner / Master Admin',
+        flightName: 'HQ' as any,
+        trade: 'Admin',
+        status: 'Active',
+      } as unknown as Airman);
+
+      setIsLoading(false);
+      setIsSuccessAnimation(true);
+      setTimeout(() => {
+        onAuthenticated();
+      }, 80);
+      return;
+    }
+
+    // Regular User: If BD No matches an office in the Global Multi-Office Directory, activate that office workspace before validating login
+    const targetOfficeMatch = findOfficeByUserId(cleanInput, airmen);
+    if (targetOfficeMatch && cleanInput !== MASTER_OWNER_USER_ID) {
+      const switched = activateMatchedOfficeForUser(targetOfficeMatch);
+      if (switched) {
+        try {
+          localDb.switchActiveOfficeWorkspace(false);
+        } catch {}
+      }
+      setOfficeIdentity(getActiveOfficeIdentity());
+    }
+
+    const activeOfficeAirmen = (() => {
+      try {
+        return localDb.getAirmen() || airmen;
+      } catch {
+        return airmen;
+      }
+    })();
+
+    const validation = await validateUserLogin(cleanInput, passwordInput, activeOfficeAirmen);
 
     if (validation.success) {
       const airman = validation.airman || {
@@ -317,7 +604,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       };
       const config = getAppConfig();
       const role = validation.detailedUser?.role || 'USER';
-      
+
       if (
         isFeatureActive(config.maintenance) &&
         role !== 'SUPER_ADMIN' &&
@@ -335,14 +622,14 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
 
       // Do not store 48456 in recent logins list so it stays invisible to regular office users
       if (cleanInput !== MASTER_OWNER_USER_ID) {
-        const updatedRecents = [cleanInput, ...officeRecentLogins.filter(x => x !== cleanInput)].slice(0, 4);
+        const updatedRecents = [cleanInput, ...officeRecentLogins.filter((x) => x !== cleanInput)].slice(0, 4);
         setOfficeRecentLogins(updatedRecents);
         localStorage.setItem('baf_recent_logins', JSON.stringify(updatedRecents));
         localStorage.setItem('baf_last_used_id', cleanInput);
         saveLastUsedIdForPortal(activeTab, cleanInput);
       }
       setLastUsedPortal(activeTab);
-      
+
       setIsLoading(false);
       setIsSuccessAnimation(true);
       setTimeout(() => {
@@ -365,34 +652,31 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         setErrorMsg('Protected system account cannot be reset here.');
         return;
       }
-      const airman = airmen.find(a => a.bdNo.toLowerCase() === cleanBd);
+      const airman = airmen.find((a) => a.bdNo.toLowerCase() === cleanBd);
       if (!airman) {
         setErrorMsg('User ID not found in Nominal Roll.');
         return;
       }
       setTargetAirman(airman);
       setResetStep(2);
-    } 
-    else if (resetStep === 2) {
+    } else if (resetStep === 2) {
       if (!targetAirman) return;
       if (resetName.trim().toLowerCase() !== targetAirman.name.toLowerCase()) {
         setErrorMsg('Name does not match our records.');
         return;
       }
       setResetStep(3);
-    }
-    else if (resetStep === 3) {
+    } else if (resetStep === 3) {
       if (!targetAirman) return;
       const cleanInputMobile = resetMobile.replace(/\D/g, '');
       const cleanTargetMobile = (targetAirman.mobileNo || '').replace(/\D/g, '');
-      
+
       if (cleanInputMobile !== cleanTargetMobile || !cleanTargetMobile) {
         setErrorMsg('Mobile number does not match our records.');
         return;
       }
       setResetStep(4);
-    }
-    else if (resetStep === 4) {
+    } else if (resetStep === 4) {
       if (!newPass || !confirmPass) {
         setErrorMsg('Please enter both PIN fields.');
         return;
@@ -405,8 +689,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
 
       const users = getDetailedUsers(airmen);
       const cleanBd = targetAirman.bdNo.toLowerCase();
-      let userDetail = users.find(u => u.bdNo.toLowerCase() === cleanBd);
-      
+      let userDetail = users.find((u) => u.bdNo.toLowerCase() === cleanBd);
+
       if (userDetail) {
         userDetail.password = newPass;
         userDetail.pin = newPass;
@@ -429,9 +713,9 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         };
         users.push(userDetail);
       }
-      
+
       saveDetailedUsers(users);
-      
+
       setSuccessAirman(targetAirman);
       setUserSession(targetAirman, userDetail.role, userDetail);
       setTimeout(() => {
@@ -452,189 +736,195 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     setTargetAirman(null);
   };
 
-  const handleUserRegister = async (e: React.FormEvent) => {
+  // Handle Custom Logo Upload in Step 1 of Register a New Office
+  const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setRegLogo(reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Step-by-Step Navigation & Live Validations for Register a New Office
+  const resolvedRegUnitName = regUnit.trim();
+
+  const isRegOfficeDuplicate = useMemo(() => {
+    if (!resolvedRegUnitName) return false;
+    return isOfficeNameAlreadyRegistered(
+      resolvedRegUnitName,
+      registeredOffices,
+      pendingOfficeRequests
+    );
+  }, [resolvedRegUnitName, registeredOffices, pendingOfficeRequests]);
+
+  const cleanRegBdDigits = useMemo(
+    () => regBdNo.replace(/^BD\/?/i, '').replace(/[^0-9]/g, '').trim(),
+    [regBdNo]
+  );
+
+  // Check if the BD No in Step 2 matches an ACTIVE member in any existing office
+  // (If Posted Out in their previous office, findOfficeByUserId returns null so they CAN be added)
+  const existingActiveMemberOffice = useMemo(() => {
+    if (!cleanRegBdDigits) return null;
+    if (cleanRegBdDigits === MASTER_OWNER_USER_ID) {
+      return { officeName: 'System Master Portal' };
+    }
+    return findOfficeByUserId(cleanRegBdDigits, airmen);
+  }, [cleanRegBdDigits, airmen, directoryTick]);
+
+  const resolvedRegTrade = (regTrade === '__CUSTOM__' ? regCustomTrade : regTrade).trim();
+  const isRegContactValid = /^01\d{9}$/.test(regContactNo.trim());
+
+  const formatUserRoleLabel = (roleValue: string) => {
+    if (roleValue === 'SUPER_ADMIN') return 'Super Admin';
+    if (roleValue === 'ADMIN') return 'Admin';
+    if (roleValue === 'USER') return 'User';
+    return roleValue;
+  };
+
+  const handleRegisterStepNext = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
-    setRegisterSuccessBanner('');
 
-    const cleanBd = regBdNo.replace(/^BD\/?/i, '').replace(/[^0-9]/g, '').trim();
-    const cleanName = regName.trim();
-    const selectedUnit = regUnit.trim() || officeIdentity.officeName || '155 UASU BAF';
-    const selectedWing = regWing.trim() || 'Flying Wing';
-    const selectedRank = (regRank.trim() || 'LAC') as Rank;
-    const selectedTrade = regTrade.trim() || 'Radio Fitter';
-    const selectedFlight = (regFlight.trim() || 'Avionics') as FlightName;
+    if (registerStep === 1) {
+      if (!resolvedRegUnitName) {
+        setErrorMsg('Please enter Office Name.');
+        return;
+      }
+      if (isRegOfficeDuplicate) {
+        setErrorMsg('Already Registered: This Office Name is already registered.');
+        return;
+      }
+      if (!regBase.trim()) {
+        setErrorMsg('Please enter BASE name.');
+        return;
+      }
+      setRegisterStep(2);
+      return;
+    }
 
-    if (!regRank) {
-      setErrorMsg('Please select your RANK.');
+    if (registerStep === 2) {
+      if (!cleanRegBdDigits) {
+        setErrorMsg('Please enter User ID (BD No).');
+        return;
+      }
+      if (existingActiveMemberOffice) {
+        setErrorMsg(
+          `BD/${cleanRegBdDigits} is currently an Active member in "${existingActiveMemberOffice.officeName}". An active member cannot be in two offices unless Posted Out.`
+        );
+        return;
+      }
+      if (!regFullName.trim()) {
+        setErrorMsg('Please enter Full Name.');
+        return;
+      }
+      if (!regSurname.trim()) {
+        setErrorMsg('Please enter Surname.');
+        return;
+      }
+      if (!resolvedRegTrade) {
+        setErrorMsg(regTrade === '__CUSTOM__' ? 'Please enter Custom Trade name.' : 'Please select Trade.');
+        return;
+      }
+      if (!regUserRole.trim()) {
+        setErrorMsg('Please select User Role.');
+        return;
+      }
+      if (!isRegContactValid) {
+        setErrorMsg('Contact No must be 11 digits and start with 01.');
+        return;
+      }
+
+      // If a Custom Trade was entered, persist it to the end of the Trade list and select it
+      if (regTrade === '__CUSTOM__' && regCustomTrade.trim()) {
+        const finalCustomTrade = regCustomTrade.trim();
+        const updatedList = addCustomTradeToList(finalCustomTrade);
+        setAvailableTrades(updatedList);
+        setRegTrade(finalCustomTrade);
+        setRegCustomTrade('');
+      }
+
+      setRegisterStep(3);
       return;
     }
-    if (!cleanBd) {
-      setErrorMsg('Please enter your USER ID (BD NO).');
+  };
+
+  const handleSubmitOfficeForApproval = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+    if (!resolvedRegUnitName || !cleanRegBdDigits) {
+      setErrorMsg('Missing Office or User ID information.');
       return;
     }
-    if (!cleanName) {
-      setErrorMsg('Please enter your NAME.');
+    if (isRegOfficeDuplicate) {
+      setErrorMsg('Already Registered: This Office Name is already registered.');
       return;
     }
-    if (!regTrade) {
-      setErrorMsg('Please select your TRADE.');
+    if (existingActiveMemberOffice) {
+      setErrorMsg(
+        `BD/${cleanRegBdDigits} is already an Active member in "${existingActiveMemberOffice.officeName}".`
+      );
       return;
     }
-    if (!regFlight) {
-      setErrorMsg('Please select your FLIGHT.');
+    if (!isRegContactValid) {
+      setErrorMsg('Contact No must be 11 digits and start with 01.');
       return;
     }
 
     setIsRegistering(true);
     try {
-      // 1. Add or update in Nominal Roll (localDb)
-      const currentAirmen = await localDb.getAirmen();
-      const existingAirman = currentAirmen.find(
-        (a) => (a.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase() === cleanBd.toLowerCase()
-      );
-
-      let createdOrUpdatedAirman: Airman;
-      if (existingAirman) {
-        createdOrUpdatedAirman = {
-          ...existingAirman,
-          rank: selectedRank,
-          name: cleanName,
-          fullName: cleanName,
-          trade: selectedTrade,
-          flightName: selectedFlight,
-          sqn: selectedUnit,
-          wing: selectedWing,
-        };
-        await localDb.updateAirman(existingAirman.id, createdOrUpdatedAirman);
-      } else {
-        createdOrUpdatedAirman = await localDb.addAirman({
-          bdNo: cleanBd,
-          rank: selectedRank,
-          name: cleanName,
-          fullName: cleanName,
-          trade: selectedTrade,
-          flightName: selectedFlight,
-          sqn: selectedUnit,
-          wing: selectedWing,
-          status: 'Active',
-          medicalCategory: 'AYE',
-          basicCategory: 'B1',
-          mobileNo: '',
-          bloodGroup: '',
-          livingStatus: 'Bilin',
-        } as any);
+      const finalTrade = resolvedRegTrade || 'Radio Fitt';
+      if (regTrade === '__CUSTOM__' && regCustomTrade.trim()) {
+        const updatedList = addCustomTradeToList(finalTrade);
+        setAvailableTrades(updatedList);
       }
 
-      // 2. Add or update in User Management (DetailedUserLogin)
-      const nowIso = new Date().toISOString();
-      const detailedUsers = getDetailedUsers(await localDb.getAirmen());
-      const existingIdx = detailedUsers.findIndex(
-        (u) => (u.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase() === cleanBd.toLowerCase()
-      );
+      const request = await submitOfficeRegistrationRequest({
+        officeName: resolvedRegUnitName,
+        wing: '',
+        officeBase: regBase.trim(),
+        officeSlogan: regSlogan.trim() || 'Intel • Surveillance • Strike',
+        officeLogo: regLogo || '/155-uasu-baf-logo.png',
+        bdNo: cleanRegBdDigits,
+        rank: 'LAC' as Rank,
+        fullName: regFullName.trim(),
+        surname: regSurname.trim(),
+        trade: finalTrade,
+        flightName: '' as FlightName,
+        userRole: (regUserRole.trim() || 'SUPER_ADMIN') as UserRole,
+        contactNo: regContactNo.trim(),
+        pin: cleanRegBdDigits,
+      });
 
-      const newUserDetail: DetailedUserLogin = {
-        id: existingIdx >= 0 ? detailedUsers[existingIdx].id : `user-login-${cleanBd}`,
-        airmanId: createdOrUpdatedAirman.id || `airman-${cleanBd}`,
-        bdNo: cleanBd,
-        userId: cleanBd,
-        rank: selectedRank,
-        name: cleanName,
-        flightName: selectedFlight,
-        trade: selectedTrade,
-        role: existingIdx >= 0 ? detailedUsers[existingIdx].role : 'USER',
-        password: existingIdx >= 0 && detailedUsers[existingIdx].password ? detailedUsers[existingIdx].password : cleanBd,
-        pin: existingIdx >= 0 && detailedUsers[existingIdx].pin ? detailedUsers[existingIdx].pin : cleanBd,
-        status: 'ACTIVE',
-        detailedAt: existingIdx >= 0 ? detailedUsers[existingIdx].detailedAt : nowIso,
-        detailedBy: 'Self Registration',
-        updatedAt: nowIso,
-      };
-
-      let updatedUsers: DetailedUserLogin[];
-      if (existingIdx >= 0) {
-        updatedUsers = [...detailedUsers];
-        updatedUsers[existingIdx] = newUserDetail;
-      } else {
-        updatedUsers = [...detailedUsers, newUserDetail];
-      }
-
-      saveDetailedUsers(updatedUsers, true);
-      await pushUserProfilesToFirebase(updatedUsers).catch(() => {});
-
-      // 3. Switch back to Login screen with User ID pre-filled
-      setBdInput(cleanBd);
-      setPasswordInput('');
-      saveLastUsedIdForPortal('Office', cleanBd);
-      localStorage.setItem('baf_last_used_id', cleanBd);
-      setIsRegisterMode(false);
-      setRegisterSuccessBanner(
-        `Registered ${selectedRank} ${cleanName} (BD/${cleanBd})! Default PIN is ${cleanBd}.`
-      );
+      await loadOfficesAndPendingRequests();
+      setSubmittedRequestRecord(request);
+      setRegisterStep(4);
     } catch (err: any) {
-      setErrorMsg(err?.message || 'Registration failed. Please try again.');
+      setErrorMsg(err?.message || 'Failed to submit registration request.');
     } finally {
       setIsRegistering(false);
     }
   };
 
-  // Unconfigured State (First Visit) OR when user clicks "⚙️ Switch / Configure Office"
-  if (!isOfficeConfigured || showSetupWizard) {
-    return (
-      <>
-        <OfficeSetupPortal
-          airmen={airmen}
-          onSetupComplete={(configuredAdminId) => {
-            setIsOfficeConfigured(true);
-            setShowSetupWizard(false);
-            setOfficeIdentity(getActiveOfficeIdentity());
-            if (configuredAdminId) {
-              setBdInput(configuredAdminId.replace(/[^0-9]/g, ''));
-            }
-          }}
-          onCancel={isOfficeConfigured ? () => setShowSetupWizard(false) : undefined}
-          onLogoSecretClick={handleLogoSecretClick}
-        />
-
-        <AppOwnerMasterPortal
-          isOpen={isMasterPortalOpen}
-          onClose={() => setIsMasterPortalOpen(false)}
-          airmen={airmen}
-          onEnterOfficeAsMaster={onAuthenticated}
-        />
-      </>
-    );
-  }
-
-  const unitOptions = Array.from(
-    new Set([
-      officeIdentity.officeName || '155 UASU BAF',
-      '155 UASU BAF',
-      'Flying Wing',
-      'Maint Wing',
-      'Admin Wing',
-      '21 SQN BAF',
-      '1 SQN BAF',
-      '3 SQN BAF',
-      '8 SQN BAF',
-      '9 SQN BAF',
-      '25 SQN BAF',
-      '35 SQN BAF',
-      '101 SUL BAF',
-      '205 MU BAF',
-      'GE (Air) ZHR',
-      'MO (Air) ZHR',
-    ])
-  );
-
   return (
     <div className="min-h-screen flex flex-col items-center bg-slate-50 dark:bg-[#070b14] print:bg-white p-4 print:p-0 select-none overflow-x-hidden print:overflow-visible justify-center transition-colors">
       <div className="fixed top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none z-0 print:hidden" />
       <div className="fixed bottom-10 right-10 w-72 h-72 bg-sky-500/10 rounded-full blur-3xl pointer-events-none z-0 print:hidden" />
-      
+
       {/* Content Area */}
-      <div className={`w-full ${isRegisterMode ? 'max-w-[440px]' : 'max-w-[325px] sm:max-w-[340px]'} relative z-10 transition-all duration-200`}>
-        
+      <div
+        className={`w-full ${
+          isRegisterMode
+            ? 'max-w-[520px]'
+            : isMasterUserTyped
+            ? 'max-w-[400px]'
+            : 'max-w-[340px] sm:max-w-[360px]'
+        } relative z-10 transition-all duration-200`}
+      >
         <div className="flex items-center justify-center mb-3">
           <div
             className="inline-flex items-center gap-1 p-1 rounded-xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200 dark:border-slate-800 shadow-sm"
@@ -673,8 +963,9 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
             <div className="flex items-center justify-center p-1">
               <Logo155UASU
                 size="lg"
+                logoOverride={isRegisterMode ? regLogo : displayedOfficeLogo}
                 onClick={handleLogoSecretClick}
-                title={officeIdentity.officeName}
+                title={isRegisterMode ? resolvedRegUnitName || 'New Office' : displayedOfficeName}
               />
             </div>
             <div>
@@ -682,24 +973,55 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                 <Shield className="w-3 h-3" />
                 <span>
                   {isRegisterMode
-                    ? 'USER REGISTER'
+                    ? registerStep === 4
+                      ? 'REGISTRATION SUBMITTED'
+                      : `REGISTER A NEW OFFICE • STEP ${registerStep} OF 3`
                     : isResetMode
                     ? 'PASSWORD RECOVERY'
+                    : isMasterUserTyped
+                    ? 'MASTER OWNER PORTAL'
                     : 'USER LOGIN PORTAL'}
                 </span>
               </div>
               <h1 className="text-xl sm:text-2xl font-black tracking-wide text-slate-900 dark:text-white flex items-center justify-center space-x-2 uppercase">
                 <span>
                   {isRegisterMode
-                    ? officeIdentity.officeBase || 'BAF BASE ZHR'
-                    : officeIdentity.officeName}
+                    ? resolvedRegUnitName || 'REGISTER A NEW OFFICE'
+                    : displayedOfficeName}
                 </span>
               </h1>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-0.5">
                 {isRegisterMode
-                  ? 'Register to Office Nominal Roll & User Management'
-                  : `${officeIdentity.officeBase || 'BAF BASE ZHR'} • ${officeIdentity.officeSlogan || 'Intel • Surveillance • Strike'}`}
+                  ? registerStep === 1
+                    ? 'Step 1: Office Information (Office Name, Base, Slogan & Logo)'
+                    : registerStep === 2
+                    ? 'Step 2: User Information (User ID, Full Name, Surname, Trade, User Role, Contact No)'
+                    : registerStep === 3
+                    ? 'Step 3: Review & Submit for Master Admin Approval'
+                    : 'Registration Request Submitted for Approval'
+                  : displayedOfficeSubtitle}
               </p>
+
+              {/* Matched User Office Badge */}
+              {!isRegisterMode && !isResetMode && matchedUserOffice && (
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-[11px] font-bold mt-2">
+                  <Building2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    {matchedUserOffice.officeName} • {matchedUserOffice.userName}
+                  </span>
+                </div>
+              )}
+
+              {/* Pending Approval Notice if User types BD No of an unapproved Office Request */}
+              {!isRegisterMode && !isResetMode && matchedPendingRequest && !matchedUserOffice && (
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-600 dark:text-amber-300 text-[11px] font-bold mt-2">
+                  <Clock className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    {matchedPendingRequest.officeName} • Pending Master Admin Approval
+                  </span>
+                </div>
+              )}
+
               {updateAvailable && !isRegisterMode && (
                 <button
                   type="button"
@@ -738,7 +1060,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
             <motion.div
               initial={{ opacity: 0, scale: 0.88 }}
               animate={{ opacity: 1, scale: 1 }}
-              transition={{ type: "spring", stiffness: 350, damping: 25 }}
+              transition={{ type: 'spring', stiffness: 350, damping: 25 }}
               className="py-5 flex flex-col items-center justify-center space-y-3.5"
             >
               <div className="relative flex items-center justify-center">
@@ -762,179 +1084,771 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                   {successAirman?.rank} {successAirman?.fullName || successAirman?.name}
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400 font-mono">
-                  ID/{successAirman?.bdNo || bdInput} • {officeIdentity.officeName}
+                  ID/{successAirman?.bdNo || bdInput} • {displayedOfficeName}
                 </p>
               </div>
 
               <div className="w-40 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden mt-1">
                 <motion.div
-                  initial={{ width: "0%" }}
-                  animate={{ width: "100%" }}
-                  transition={{ duration: 0.45, ease: "easeInOut" }}
+                  initial={{ width: '0%' }}
+                  animate={{ width: '100%' }}
+                  transition={{ duration: 0.45, ease: 'easeInOut' }}
                   className="h-full bg-gradient-to-r from-emerald-500 to-teal-400"
                 />
               </div>
             </motion.div>
           ) : isRegisterMode ? (
-            /* USER REGISTER FORM (Matches Screenshot Layout) */
-            <form onSubmit={handleUserRegister} className="space-y-3.5 pt-1 text-left animate-fadeIn">
-              {/* Row 1: SQN / UNIT & WING */}
-              <div className="grid grid-cols-2 gap-3">
-                <select
-                  value={regUnit}
-                  onChange={(e) => setRegUnit(e.target.value)}
-                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
-                >
-                  <option value="">SQN / UNIT</option>
-                  {unitOptions.map((u) => (
-                    <option key={u} value={u}>
-                      {u}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  value={regWing}
-                  onChange={(e) => setRegWing(e.target.value)}
-                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
-                >
-                  <option value="">WING</option>
-                  <option value="Flying Wing">Flying Wing</option>
-                  <option value="Maint Wing">Maint Wing</option>
-                  <option value="Admin Wing">Admin Wing</option>
-                  <option value="Ops Wing">Ops Wing</option>
-                  <option value="HQ">HQ</option>
-                  <option value="C&M">C&M</option>
-                </select>
+            /* 3-4 STEP REGISTER A NEW OFFICE WIZARD */
+            <div className="space-y-4 pt-1 text-left animate-fadeIn">
+              {/* Step Progress Bar */}
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { step: 1, title: '1. Office Info' },
+                  { step: 2, title: '2. User Info' },
+                  { step: 3, title: '3. Submit Approval' },
+                ].map((item) => {
+                  const isActive = registerStep === item.step;
+                  const isDone = registerStep > item.step;
+                  return (
+                    <button
+                      key={item.step}
+                      type="button"
+                      onClick={() => {
+                        if (item.step < registerStep && registerStep !== 4) {
+                          setRegisterStep(item.step as 1 | 2 | 3);
+                          setErrorMsg('');
+                        }
+                      }}
+                      className={`py-2 px-2.5 rounded-xl border text-[11px] font-black uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all ${
+                        isActive
+                          ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-600 dark:text-emerald-300 shadow-sm'
+                          : isDone
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400 cursor-pointer'
+                          : 'bg-slate-100 dark:bg-slate-900/70 border-slate-200 dark:border-slate-800 text-slate-400 dark:text-slate-500'
+                      }`}
+                    >
+                      {isDone ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> : null}
+                      <span className="truncate">{item.title}</span>
+                    </button>
+                  );
+                })}
               </div>
 
-              {/* Row 2: RANK & USER ID (BD NO) */}
-              <div className="grid grid-cols-2 gap-3">
-                <select
-                  value={regRank}
-                  onChange={(e) => setRegRank(e.target.value)}
-                  required
-                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
-                >
-                  <option value="">RANK</option>
-                  <option value="MWO">MWO</option>
-                  <option value="SWO">SWO</option>
-                  <option value="WO">WO</option>
-                  <option value="Sgt">Sgt</option>
-                  <option value="Cpl">Cpl</option>
-                  <option value="LAC">LAC</option>
-                  <option value="AC-1">AC-1</option>
-                  <option value="AC-2">AC-2</option>
-                  <option value="Civilian">Civilian</option>
-                </select>
+              {/* STEP 1: OFFICE INFORMATION (OFFICE NAME, BASE, OFFICE SLOGAN & LOGO) */}
+              {registerStep === 1 && (
+                <form onSubmit={handleRegisterStepNext} className="space-y-3.5">
+                  <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#070b14]/90 border border-slate-200 dark:border-slate-800 space-y-3.5">
+                    <div className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                      <Building2 className="w-4 h-4" />
+                      <span>Step 1: Office Information</span>
+                    </div>
 
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={regBdNo}
-                  onChange={(e) => setRegBdNo(e.target.value.replace(/[^0-9]/g, ''))}
-                  placeholder="USER ID (BD NO)"
-                  required
-                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-400 focus:outline-none focus:border-emerald-500"
-                />
-              </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
+                      {/* Box: Office Name (Plain Text Input, Mandatory, Live Duplicate Check) */}
+                      {(() => {
+                        const isFocused = focusedRegField === 'regUnit';
+                        const isFloating = isFocused || regUnit.trim().length > 0;
+                        return (
+                          <div className="space-y-1">
+                            <div className="relative">
+                              <input
+                                id="reg-office-name"
+                                type="text"
+                                value={regUnit}
+                                onChange={(e) => {
+                                  setRegUnit(e.target.value);
+                                  setErrorMsg('');
+                                }}
+                                onFocus={() => setFocusedRegField('regUnit')}
+                                onBlur={() => setFocusedRegField((prev) => (prev === 'regUnit' ? null : prev))}
+                                placeholder=""
+                                required
+                                className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                  isRegOfficeDuplicate
+                                    ? 'border-red-500 ring-2 ring-red-500/20'
+                                    : isFocused
+                                    ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                    : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                                }`}
+                              />
+                              <label
+                                htmlFor="reg-office-name"
+                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                  isFloating
+                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                      (isRegOfficeDuplicate
+                                        ? 'text-red-500 dark:text-red-400'
+                                        : isFocused
+                                        ? 'text-emerald-600 dark:text-emerald-400'
+                                        : 'text-slate-500 dark:text-slate-400')
+                                    : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                                }`}
+                              >
+                                Office Name *
+                              </label>
+                            </div>
+                            {isRegOfficeDuplicate && (
+                              <div className="flex items-center gap-1 text-[11px] font-bold text-red-500 dark:text-red-400 px-1">
+                                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                                <span>Already Registered</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
 
-              {/* Row 3: NAME */}
-              <div>
-                <input
-                  type="text"
-                  value={regName}
-                  onChange={(e) => setRegName(e.target.value)}
-                  placeholder="NAME"
-                  required
-                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-400 focus:outline-none focus:border-emerald-500"
-                />
-              </div>
+                      {/* Box: BASE (Mandatory) */}
+                      {(() => {
+                        const isFocused = focusedRegField === 'regBase';
+                        const isFloating = isFocused || regBase.trim().length > 0;
+                        return (
+                          <div className="relative">
+                            <input
+                              id="reg-base"
+                              type="text"
+                              value={regBase}
+                              onChange={(e) => {
+                                setRegBase(e.target.value);
+                                setErrorMsg('');
+                              }}
+                              onFocus={() => setFocusedRegField('regBase')}
+                              onBlur={() => setFocusedRegField((prev) => (prev === 'regBase' ? null : prev))}
+                              placeholder=""
+                              required
+                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                isFocused
+                                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                  : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                              }`}
+                            />
+                            <label
+                              htmlFor="reg-base"
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                isFloating
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                  : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                              }`}
+                            >
+                              BASE *
+                            </label>
+                          </div>
+                        );
+                      })()}
+                    </div>
 
-              {/* Row 4: TRADE & FLIGHT */}
-              <div className="grid grid-cols-2 gap-3">
-                <select
-                  value={regTrade}
-                  onChange={(e) => setRegTrade(e.target.value)}
-                  required
-                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
-                >
-                  <option value="">TRADE</option>
-                  <option value="Radio Fitter">Radio Fitter</option>
-                  <option value="Elect Fitter">Elect Fitter</option>
-                  <option value="Inst Fitter">Inst Fitter</option>
-                  <option value="A/F Fitter">A/F Fitter</option>
-                  <option value="Eng Fitter">Eng Fitter</option>
-                  <option value="Armt Fitter">Armt Fitter</option>
-                  <option value="LSE">LSE</option>
-                  <option value="Admin Asst">Admin Asst</option>
-                  <option value="Accts Asst">Accts Asst</option>
-                  <option value="Met Asst">Met Asst</option>
-                  <option value="Ops Asst">Ops Asst</option>
-                  <option value="GCI">GCI</option>
-                  <option value="ATCA">ATCA</option>
-                  <option value="Sec Asst (GD)">Sec Asst (GD)</option>
-                  <option value="Med Asst">Med Asst</option>
-                  <option value="MTF">MTF</option>
-                  <option value="MTD">MTD</option>
-                  <option value="Provost">Provost</option>
-                  <option value="Cypher Asst">Cypher Asst</option>
-                  <option value="Radar Op">Radar Op</option>
-                  <option value="AFSO">AFSO</option>
-                  <option value="Other">Other</option>
-                </select>
+                    {/* Box: OFFICE SLOGAN */}
+                    <div className="pt-1">
+                      {(() => {
+                        const isFocused = focusedRegField === 'regSlogan';
+                        const isFloating = isFocused || regSlogan.trim().length > 0;
+                        return (
+                          <div className="relative">
+                            <input
+                              id="reg-slogan"
+                              type="text"
+                              value={regSlogan}
+                              onChange={(e) => setRegSlogan(e.target.value)}
+                              onFocus={() => setFocusedRegField('regSlogan')}
+                              onBlur={() => setFocusedRegField((prev) => (prev === 'regSlogan' ? null : prev))}
+                              placeholder=""
+                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                isFocused
+                                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                  : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                              }`}
+                            />
+                            <label
+                              htmlFor="reg-slogan"
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                isFloating
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                  : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                              }`}
+                            >
+                              OFFICE SLOGAN
+                            </label>
+                          </div>
+                        );
+                      })()}
+                    </div>
 
-                <select
-                  value={regFlight}
-                  onChange={(e) => setRegFlight(e.target.value)}
-                  required
-                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
-                >
-                  <option value="">FLIGHT</option>
-                  <option value="Avionics">Avionics</option>
-                  <option value="Mechanics">Mechanics</option>
-                  <option value="GCS">GCS</option>
-                  <option value="Admin">Admin</option>
-                  <option value="HQ">HQ</option>
-                  <option value="C&M">C&M</option>
-                  <option value="Ops">Ops</option>
-                  <option value="Flugzeug">Flugzeug</option>
-                  <option value="Weapon">Weapon</option>
-                </select>
-              </div>
+                    {/* Office Logo Upload */}
+                    <div className="pt-1 flex items-center justify-between gap-3 p-2.5 rounded-xl bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800">
+                      <div className="flex items-center gap-2.5">
+                        <img
+                          src={regLogo || '/155-uasu-baf-logo.png'}
+                          alt="Office Logo"
+                          className="w-9 h-9 rounded-lg object-contain bg-slate-100 dark:bg-slate-800 p-1 border border-slate-200 dark:border-slate-700"
+                        />
+                        <div>
+                          <div className="text-[11px] font-bold text-slate-800 dark:text-slate-200">
+                            Office Emblem / Logo
+                          </div>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                            Default BAF Crest or Upload Custom PNG/JPG
+                          </div>
+                        </div>
+                      </div>
+                      <input
+                        ref={logoInputRef}
+                        type="file"
+                        accept="image/*"
+                        onChange={handleLogoFileChange}
+                        className="hidden"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => logoInputRef.current?.click()}
+                        className="px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-[11px] font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1.5 cursor-pointer shrink-0"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Upload</span>
+                      </button>
+                    </div>
+                  </div>
 
-              {/* REGISTER Button */}
-              <button
-                type="submit"
-                disabled={isRegistering}
-                className="w-full py-3.5 px-4 rounded-xl bg-[#10b981] hover:bg-[#059669] text-slate-950 text-xs font-black tracking-wider uppercase transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-emerald-500/20 disabled:opacity-50 mt-2"
-              >
-                {isRegistering ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>REGISTERING...</span>
-                  </>
-                ) : (
-                  <>
-                    <UserPlus className="w-4 h-4 stroke-[2.5]" />
-                    <span>REGISTER</span>
-                  </>
-                )}
-              </button>
+                  <div className="flex gap-2.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsRegisterMode(false);
+                        setErrorMsg('');
+                      }}
+                      className="flex-1 py-3 px-4 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" />
+                      <span>Back to Login</span>
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isRegOfficeDuplicate}
+                      className="flex-1 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed text-white text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-600/20"
+                    >
+                      <span>{isRegOfficeDuplicate ? 'Already Registered' : 'Next: User Info'}</span>
+                      {!isRegOfficeDuplicate && <ChevronRight className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </form>
+              )}
 
-              {/* Back to Login Button */}
-              <button
-                type="button"
-                onClick={() => {
-                  setIsRegisterMode(false);
-                  setErrorMsg('');
-                }}
-                className="w-full py-3 px-4 rounded-xl bg-slate-100 dark:bg-[#070b14]/90 hover:bg-slate-200 dark:hover:bg-slate-800/80 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Back to Login</span>
-              </button>
-            </form>
+              {/* STEP 2: USER INFORMATION (EXACTLY 6 FLOATING-LABEL BOXES, NO DEFAULTS) */}
+              {registerStep === 2 && (
+                <form onSubmit={handleRegisterStepNext} className="space-y-3.5">
+                  <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#070b14]/90 border border-slate-200 dark:border-slate-800 space-y-3.5">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                        <UserCheck className="w-4 h-4" />
+                        <span>Step 2: User Information</span>
+                      </div>
+                      <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400">
+                        {resolvedRegUnitName}
+                      </span>
+                    </div>
+
+                    {/* 6 Floating-Label Boxes (Login Portal Style) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
+                      {/* 1. User ID (BD No) - Cannot match an Active member in any existing office */}
+                      {(() => {
+                        const isFocused = focusedRegField === 'regBdNo';
+                        const isFloating = isFocused || regBdNo.trim().length > 0;
+                        const hasActiveConflict = Boolean(existingActiveMemberOffice);
+                        return (
+                          <div className="space-y-1">
+                            <div className="relative">
+                              <input
+                                id="reg-bd-no"
+                                type="text"
+                                inputMode="numeric"
+                                value={regBdNo}
+                                onChange={(e) => {
+                                  setRegBdNo(e.target.value.replace(/[^0-9]/g, ''));
+                                  setErrorMsg('');
+                                }}
+                                onFocus={() => setFocusedRegField('regBdNo')}
+                                onBlur={() => setFocusedRegField((prev) => (prev === 'regBdNo' ? null : prev))}
+                                placeholder=""
+                                required
+                                className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-mono font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                  hasActiveConflict
+                                    ? 'border-red-500 ring-2 ring-red-500/20'
+                                    : isFocused
+                                    ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                    : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                                }`}
+                              />
+                              <label
+                                htmlFor="reg-bd-no"
+                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                  isFloating
+                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                      (hasActiveConflict
+                                        ? 'text-red-500 dark:text-red-400'
+                                        : isFocused
+                                        ? 'text-emerald-600 dark:text-emerald-400'
+                                        : 'text-slate-500 dark:text-slate-400')
+                                    : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                                }`}
+                              >
+                                User ID (BD No)
+                              </label>
+                            </div>
+                            {hasActiveConflict && (
+                              <div className="flex items-center gap-1 text-[10px] font-bold text-red-500 dark:text-red-400 px-1">
+                                <AlertCircle className="w-3 h-3 shrink-0" />
+                                <span>Already Active in {existingActiveMemberOffice?.officeName}</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+
+                      {/* 2. Full Name */}
+                      {(() => {
+                        const isFocused = focusedRegField === 'regFullName';
+                        const isFloating = isFocused || regFullName.trim().length > 0;
+                        return (
+                          <div className="relative">
+                            <input
+                              id="reg-full-name"
+                              type="text"
+                              value={regFullName}
+                              onChange={(e) => setRegFullName(e.target.value)}
+                              onFocus={() => setFocusedRegField('regFullName')}
+                              onBlur={() => setFocusedRegField((prev) => (prev === 'regFullName' ? null : prev))}
+                              placeholder=""
+                              required
+                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                isFocused
+                                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                  : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                              }`}
+                            />
+                            <label
+                              htmlFor="reg-full-name"
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                isFloating
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                  : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                              }`}
+                            >
+                              Full Name
+                            </label>
+                          </div>
+                        );
+                      })()}
+
+                      {/* 3. Surname */}
+                      {(() => {
+                        const isFocused = focusedRegField === 'regSurname';
+                        const isFloating = isFocused || regSurname.trim().length > 0;
+                        return (
+                          <div className="relative">
+                            <input
+                              id="reg-surname"
+                              type="text"
+                              value={regSurname}
+                              onChange={(e) => setRegSurname(e.target.value)}
+                              onFocus={() => setFocusedRegField('regSurname')}
+                              onBlur={() => setFocusedRegField((prev) => (prev === 'regSurname' ? null : prev))}
+                              placeholder=""
+                              required
+                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                isFocused
+                                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                  : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                              }`}
+                            />
+                            <label
+                              htmlFor="reg-surname"
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                isFloating
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                  : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                              }`}
+                            >
+                              Surname
+                            </label>
+                          </div>
+                        );
+                      })()}
+
+                      {/* 4. Trade (Exact list from Pic 3 + Custom at bottom) */}
+                      {(() => {
+                        const isFocused = focusedRegField === 'regTrade';
+                        const isFloating = isFocused || regTrade.trim().length > 0;
+                        return (
+                          <div className="relative">
+                            <select
+                              id="reg-trade"
+                              value={regTrade}
+                              onChange={(e) => {
+                                setRegTrade(e.target.value);
+                                setErrorMsg('');
+                              }}
+                              onFocus={() => setFocusedRegField('regTrade')}
+                              onBlur={() => setFocusedRegField((prev) => (prev === 'regTrade' ? null : prev))}
+                              required
+                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold outline-none transition-all duration-200 cursor-pointer ${
+                                !regTrade ? 'text-transparent' : 'text-slate-900 dark:text-white'
+                              } ${
+                                isFocused
+                                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                  : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                              }`}
+                            >
+                              <option value="" disabled hidden></option>
+                              {availableTrades.map((t) => (
+                                <option
+                                  key={t}
+                                  value={t}
+                                  className="text-slate-900 dark:text-white bg-white dark:bg-slate-900"
+                                >
+                                  {t}
+                                </option>
+                              ))}
+                              <option
+                                value="__CUSTOM__"
+                                className="text-emerald-600 dark:text-emerald-400 font-bold bg-white dark:bg-slate-900"
+                              >
+                                Custom
+                              </option>
+                            </select>
+                            <label
+                              htmlFor="reg-trade"
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                isFloating
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                  : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                              }`}
+                            >
+                              Trade
+                            </label>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Custom Trade Input (Appears when Custom is chosen in Trade dropdown) */}
+                      {regTrade === '__CUSTOM__' &&
+                        (() => {
+                          const isFocused = focusedRegField === 'regCustomTrade';
+                          const isFloating = isFocused || regCustomTrade.trim().length > 0;
+                          return (
+                            <div className="relative sm:col-span-2">
+                              <input
+                                id="reg-custom-trade"
+                                type="text"
+                                value={regCustomTrade}
+                                onChange={(e) => {
+                                  setRegCustomTrade(e.target.value);
+                                  setErrorMsg('');
+                                }}
+                                onFocus={() => setFocusedRegField('regCustomTrade')}
+                                onBlur={() => {
+                                  setFocusedRegField((prev) => (prev === 'regCustomTrade' ? null : prev));
+                                  if (regCustomTrade.trim()) {
+                                    const saved = regCustomTrade.trim();
+                                    const nextTrades = addCustomTradeToList(saved);
+                                    setAvailableTrades(nextTrades);
+                                    setRegTrade(saved);
+                                    setRegCustomTrade('');
+                                  }
+                                }}
+                                placeholder=""
+                                required
+                                className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                  isFocused
+                                    ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                    : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                                }`}
+                              />
+                              <label
+                                htmlFor="reg-custom-trade"
+                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                  isFloating
+                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                      (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                    : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                                }`}
+                              >
+                                Custom Trade Name
+                              </label>
+                            </div>
+                          );
+                        })()}
+
+                      {/* 5. User Role (ONLY Super Admin, Admin, User - no extra text in parentheses) */}
+                      {(() => {
+                        const isFocused = focusedRegField === 'regUserRole';
+                        const isFloating = isFocused || regUserRole.trim().length > 0;
+                        return (
+                          <div className="relative">
+                            <select
+                              id="reg-user-role"
+                              value={regUserRole}
+                              onChange={(e) => setRegUserRole(e.target.value)}
+                              onFocus={() => setFocusedRegField('regUserRole')}
+                              onBlur={() => setFocusedRegField((prev) => (prev === 'regUserRole' ? null : prev))}
+                              required
+                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold outline-none transition-all duration-200 cursor-pointer ${
+                                !regUserRole ? 'text-transparent' : 'text-slate-900 dark:text-white'
+                              } ${
+                                isFocused
+                                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                  : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                              }`}
+                            >
+                              <option value="" disabled hidden></option>
+                              <option value="SUPER_ADMIN" className="text-slate-900 dark:text-white bg-white dark:bg-slate-900">Super Admin</option>
+                              <option value="ADMIN" className="text-slate-900 dark:text-white bg-white dark:bg-slate-900">Admin</option>
+                              <option value="USER" className="text-slate-900 dark:text-white bg-white dark:bg-slate-900">User</option>
+                            </select>
+                            <label
+                              htmlFor="reg-user-role"
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                isFloating
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                  : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                              }`}
+                            >
+                              User Role
+                            </label>
+                          </div>
+                        );
+                      })()}
+
+                      {/* 6. Contact No (Must be 11 digits starting with 01) */}
+                      {(() => {
+                        const isFocused = focusedRegField === 'regContactNo';
+                        const isFloating = isFocused || regContactNo.trim().length > 0;
+                        const hasContactError = regContactNo.length > 0 && !isRegContactValid;
+                        return (
+                          <div className="space-y-1">
+                            <div className="relative">
+                              <input
+                                id="reg-contact-no"
+                                type="tel"
+                                inputMode="numeric"
+                                maxLength={11}
+                                value={regContactNo}
+                                onChange={(e) => {
+                                  setRegContactNo(e.target.value.replace(/[^0-9]/g, '').slice(0, 11));
+                                  setErrorMsg('');
+                                }}
+                                onFocus={() => setFocusedRegField('regContactNo')}
+                                onBlur={() => setFocusedRegField((prev) => (prev === 'regContactNo' ? null : prev))}
+                                placeholder=""
+                                required
+                                className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-mono font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                  hasContactError
+                                    ? 'border-red-500 ring-2 ring-red-500/20'
+                                    : isFocused
+                                    ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                    : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                                }`}
+                              />
+                              <label
+                                htmlFor="reg-contact-no"
+                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                  isFloating
+                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                      (hasContactError
+                                        ? 'text-red-500 dark:text-red-400'
+                                        : isFocused
+                                        ? 'text-emerald-600 dark:text-emerald-400'
+                                        : 'text-slate-500 dark:text-slate-400')
+                                    : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                                }`}
+                              >
+                                Contact No
+                              </label>
+                            </div>
+                            {hasContactError && (
+                              <div className="flex items-center gap-1 text-[10px] font-bold text-red-500 dark:text-red-400 px-1">
+                                <AlertCircle className="w-3 h-3 shrink-0" />
+                                <span>Must be 11 digits starting with 01</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRegisterStep(1);
+                        setErrorMsg('');
+                      }}
+                      className="flex-1 py-3 px-4 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                      <span>Back: Office Info</span>
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={Boolean(existingActiveMemberOffice)}
+                      className="flex-1 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed text-white text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-600/20"
+                    >
+                      <span>Next: Review & Submit</span>
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* STEP 3: REVIEW & SUBMIT FOR APPROVAL */}
+              {registerStep === 3 && (
+                <form onSubmit={handleSubmitOfficeForApproval} className="space-y-3.5">
+                  <div className="p-4 rounded-xl bg-slate-50 dark:bg-[#070b14]/90 border border-slate-200 dark:border-slate-800 space-y-3">
+                    <div className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                      <Send className="w-4 h-4" />
+                      <span>Step 3: Submit for Master Admin Approval</span>
+                    </div>
+
+                    {/* Office Summary Box */}
+                    <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-3">
+                      <img
+                        src={regLogo || '/155-uasu-baf-logo.png'}
+                        alt={resolvedRegUnitName}
+                        className="w-11 h-11 rounded-xl object-contain bg-slate-100 dark:bg-slate-800 p-1.5 border border-slate-200 dark:border-slate-700 shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[10px] font-black uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                          1. Office Information
+                        </div>
+                        <div className="text-sm font-black text-slate-900 dark:text-white truncate">
+                          {resolvedRegUnitName}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          {regBase} {regSlogan ? `• ${regSlogan}` : ''}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* User Summary Boxed Grid (6 Fields) */}
+                    <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
+                      <div className="text-[10px] font-black uppercase tracking-wider text-sky-600 dark:text-sky-400">
+                        2. User Information (Biodata & User Management)
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                        <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
+                          <div className="text-[9px] uppercase font-bold text-slate-400">User ID (BD No)</div>
+                          <div className="font-mono font-black text-emerald-600 dark:text-emerald-400">BD/{cleanRegBdDigits || regBdNo}</div>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
+                          <div className="text-[9px] uppercase font-bold text-slate-400">Full Name</div>
+                          <div className="font-bold text-slate-900 dark:text-white truncate">
+                            {regFullName}
+                          </div>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
+                          <div className="text-[9px] uppercase font-bold text-slate-400">Surname</div>
+                          <div className="font-bold text-slate-900 dark:text-white truncate">{regSurname}</div>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
+                          <div className="text-[9px] uppercase font-bold text-slate-400">Trade</div>
+                          <div className="font-bold text-slate-900 dark:text-white truncate">{resolvedRegTrade}</div>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
+                          <div className="text-[9px] uppercase font-bold text-slate-400">User Role</div>
+                          <div className="font-black text-amber-600 dark:text-amber-400 truncate">{formatUserRoleLabel(regUserRole)}</div>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
+                          <div className="text-[9px] uppercase font-bold text-slate-400">Contact No</div>
+                          <div className="font-mono font-bold text-slate-900 dark:text-white truncate">{regContactNo}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-300 font-medium leading-relaxed">
+                      Upon clicking <strong>Submit for Approval</strong>, this request will be sent for approval. Once approved, the new office workspace will be created and your record will be automatically added to <strong>Biodata Register</strong> & <strong>User Management</strong>.
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRegisterStep(2);
+                        setErrorMsg('');
+                      }}
+                      className="flex-1 py-3 px-4 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                      <span>Back: User Info</span>
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isRegistering}
+                      className="flex-1 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-emerald-600/20 disabled:opacity-50"
+                    >
+                      {isRegistering ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>SUBMITTING...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Send className="w-4 h-4" />
+                          <span>Submit for Approval</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* STEP 4: SUBMITTED CONFIRMATION (NO MASTER ADMIN PANEL BUTTON) */}
+              {registerStep === 4 && (
+                <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-center space-y-3.5 animate-fadeIn">
+                  <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-500 flex items-center justify-center mx-auto">
+                    <CheckCircle2 className="w-6 h-6" />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-600 dark:text-amber-300 text-[10px] font-black uppercase tracking-wider">
+                      <Clock className="w-3 h-3" />
+                      <span>Pending Approval</span>
+                    </div>
+                    <h3 className="text-base font-black text-slate-900 dark:text-white">
+                      {submittedRequestRecord?.officeName || resolvedRegUnitName}
+                    </h3>
+                    <p className="text-xs text-slate-600 dark:text-slate-300">
+                      Requester: <strong>{submittedRequestRecord?.fullName || regFullName}</strong> (BD/{submittedRequestRecord?.bdNo || regBdNo})
+                    </p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed pt-1">
+                      Your New Office registration request has been submitted for approval. Once approved, your New Office will be created and your profile will be updated in <strong>Biodata Register</strong> & <strong>User Management</strong>.
+                    </p>
+                  </div>
+
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsRegisterMode(false);
+                        setRegisterStep(1);
+                        setBdInput('');
+                        setPasswordInput('');
+                        setRegisterSuccessBanner(
+                          `Request for "${submittedRequestRecord?.officeName || resolvedRegUnitName}" has been submitted for approval!`
+                        );
+                      }}
+                      className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-md"
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                      <span>Back to Login Portal</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           ) : !isResetMode ? (
             <form onSubmit={handleSubmit} className="space-y-4 pt-1" ref={loginPinRef}>
               {(() => {
@@ -956,7 +1870,9 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                             setBdInput(val);
                             setErrorMsg('');
                             if (targetAirman) setTargetAirman(null);
-                            saveLastUsedIdForPortal('Office', val);
+                            if (val && val !== MASTER_OWNER_USER_ID) {
+                              saveLastUsedIdForPortal('Office', val);
+                            }
                           }}
                           onKeyDown={(e) => {
                             if (
@@ -975,7 +1891,9 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                             if (pasted) {
                               setBdInput(pasted);
                               setErrorMsg('');
-                              saveLastUsedIdForPortal('Office', pasted);
+                              if (pasted !== MASTER_OWNER_USER_ID) {
+                                saveLastUsedIdForPortal('Office', pasted);
+                              }
                             }
                           }}
                           onFocus={() => {
@@ -985,7 +1903,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                           onBlur={() => {
                             setTimeout(() => setIsUserIdFocused(false), 200);
                             const cleanInput = bdInput.replace(/^BD\/?/i, '').replace(/[^0-9]/g, '').trim();
-                            if (cleanInput) {
+                            if (cleanInput && cleanInput !== MASTER_OWNER_USER_ID) {
                               saveLastUsedIdForPortal('Office', cleanInput);
                               const found = airmen.find(
                                 (a) => (a.bdNo || '').replace(/^BD\/?/i, '').replace(/[^0-9]/g, '').trim().toLowerCase() === cleanInput.toLowerCase()
@@ -1014,7 +1932,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                         </label>
                       </div>
 
-                      {recentLogins.length > 0 && isUserIdFocused && (
+                      {recentLogins.length > 0 && isUserIdFocused && !isMasterUserTyped && (
                         <div className="mt-2 p-2 bg-slate-100 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700">
                           <div className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2 px-1">Recent Accounts</div>
                           {recentLogins.map((id) => (
@@ -1048,6 +1966,74 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                         </div>
                       )}
                     </div>
+
+                    {/* MASTER USER ID (48456) OFFICE SELECTION LIST */}
+                    {isMasterUserTyped && (
+                      <div className="text-left p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2.5 animate-fadeIn">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                            <Building2 className="w-3.5 h-3.5" />
+                            <span>Select Office to Login</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIsMasterPortalOpen(true)}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-700 dark:text-amber-300 text-[10px] font-black uppercase tracking-wider cursor-pointer transition-all"
+                          >
+                            <Shield className="w-3 h-3" />
+                            <span>Master Panel</span>
+                            {pendingRequestsCount > 0 && (
+                              <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-slate-950 text-[9px] font-black">
+                                {pendingRequestsCount}
+                              </span>
+                            )}
+                          </button>
+                        </div>
+
+                        <div className="max-h-44 overflow-y-auto space-y-1.5 pr-0.5">
+                          {registeredOffices.map((office) => {
+                            const officeKey = office.officeCode || office.projectId;
+                            const isSelected =
+                              (selectedMasterOffice?.officeCode || selectedMasterOffice?.projectId) === officeKey;
+                            return (
+                              <button
+                                key={officeKey}
+                                type="button"
+                                onClick={() => setSelectedMasterOfficeId(officeKey)}
+                                className={`w-full p-2.5 rounded-xl border text-left transition-all flex items-center justify-between gap-2 cursor-pointer ${
+                                  isSelected
+                                    ? 'bg-emerald-600/15 border-emerald-500 text-slate-900 dark:text-white shadow-sm'
+                                    : 'bg-white/80 dark:bg-slate-900/80 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-700'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <img
+                                    src={office.officeLogo || '/155-uasu-baf-logo.png'}
+                                    alt={office.officeName}
+                                    className="w-7 h-7 rounded-lg object-contain bg-slate-100 dark:bg-slate-800 p-0.5 border border-slate-200 dark:border-slate-700 shrink-0"
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-black truncate">{office.officeName}</div>
+                                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate">
+                                      Code: {officeKey} • {office.totalUsers} Users
+                                    </div>
+                                  </div>
+                                </div>
+                                <div
+                                  className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${
+                                    isSelected
+                                      ? 'border-emerald-500 bg-emerald-500 text-white'
+                                      : 'border-slate-400 dark:border-slate-600'
+                                  }`}
+                                >
+                                  {isSelected && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
 
                     <div className="text-left relative pt-1">
                       <div className="relative">
@@ -1120,7 +2106,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                   </>
                 );
               })()}
-              
+
               <button
                 type="submit"
                 disabled={isLoading || !!successAirman}
@@ -1134,7 +2120,11 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                 ) : (
                   <>
                     <LogIn className="w-4 h-4" />
-                    <span>Login</span>
+                    <span>
+                      {isMasterUserTyped && selectedMasterOffice
+                        ? `Login to ${selectedMasterOffice.officeName}`
+                        : 'Login'}
+                    </span>
                   </>
                 )}
               </button>
@@ -1144,13 +2134,26 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                 onClick={() => {
                   setErrorMsg('');
                   setRegisterSuccessBanner('');
-                  setRegUnit(officeIdentity.officeName || '155 UASU BAF');
+                  setRegUnit('');
+                  setRegBase('');
+                  setRegSlogan('');
+                  setRegBdNo('');
+                  setRegFullName('');
+                  setRegSurname('');
+                  setRegTrade('');
+                  setRegCustomTrade('');
+                  setAvailableTrades(getAvailableTrades());
+                  setRegUserRole('');
+                  setRegContactNo('');
+                  setFocusedRegField(null);
+                  setRegisterStep(1);
+                  setSubmittedRequestRecord(null);
                   setIsRegisterMode(true);
                 }}
                 className="w-full py-2.5 px-4 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-xs font-black tracking-wider uppercase transition-all flex items-center justify-center gap-2 cursor-pointer"
               >
                 <UserPlus className="w-4 h-4" />
-                <span>User Register</span>
+                <span>Register a New Office</span>
               </button>
 
               <div className="flex flex-col items-center space-y-2.5 mt-3">
@@ -1160,18 +2163,6 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                   className="text-xs font-semibold text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors cursor-pointer underline"
                 >
                   Forgot Login PIN?
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setErrorMsg('');
-                    setShowSetupWizard(true);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800/80 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 border border-slate-200 dark:border-slate-700/80 text-[11px] font-bold text-slate-600 dark:text-slate-300 hover:text-emerald-600 dark:hover:text-emerald-400 transition-all cursor-pointer"
-                >
-                  <Settings className="w-3.5 h-3.5" />
-                  <span>⚙️ Switch / Configure Office</span>
                 </button>
               </div>
             </form>
@@ -1212,7 +2203,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                   </div>
                 </div>
               )}
-              
+
               {resetStep === 2 && (
                 <div className="space-y-1.5 text-left">
                   <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-wider">Step 2: Enter Your Full Name</label>
@@ -1249,7 +2240,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                     <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-wider">Enter New PIN</label>
                     <input
                       type="text"
-                      style={{ WebkitTextSecurity: "disc" }}
+                      style={{ WebkitTextSecurity: 'disc' }}
                       inputMode="numeric"
                       pattern="[0-9]*"
                       value={newPass}
@@ -1282,7 +2273,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                     <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-wider">Confirm Your PIN</label>
                     <input
                       type="text"
-                      style={{ WebkitTextSecurity: "disc" }}
+                      style={{ WebkitTextSecurity: 'disc' }}
                       inputMode="numeric"
                       pattern="[0-9]*"
                       value={confirmPass}
@@ -1338,7 +2329,11 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       {/* Secret App Owner Master Portal Modal */}
       <AppOwnerMasterPortal
         isOpen={isMasterPortalOpen}
-        onClose={() => setIsMasterPortalOpen(false)}
+        onClose={() => {
+          setIsMasterPortalOpen(false);
+          loadOfficesAndPendingRequests();
+          setDirectoryTick((t) => t + 1);
+        }}
         airmen={airmen}
         onEnterOfficeAsMaster={onAuthenticated}
       />
@@ -1353,8 +2348,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
           currentVersionName={appVersionInfo.versionName}
         />
       )}
-
     </div>
   );
 };
+
 

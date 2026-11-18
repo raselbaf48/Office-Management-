@@ -21,6 +21,7 @@ import {
   Firestore as FirestoreLite,
 } from 'firebase/firestore/lite';
 import firebaseConfigData from '../firebase-applet-config.json';
+import { getRawLocalStorageItem, setRawLocalStorageItem } from './utils/safeStorage';
 
 // ============================================================================
 // 1. MASTER OWNER CONFIGURATION & CONSTANTS
@@ -42,12 +43,61 @@ export const MASTER_OWNER_CONFIG = {
 export const CUSTOM_OFFICE_CONFIG_KEY = 'custom_office_config';
 export const MASTER_OFFICES_CACHE_KEY = 'baf_master_registered_offices_cache';
 export const OFFICE_PROFILE_STORAGE_KEY = 'baf_office_profile_v1';
+export const GLOBAL_USER_OFFICE_MAP_KEY = 'baf_global_user_office_map_v1';
+export const PENDING_OFFICE_REQUESTS_KEY = 'baf_pending_office_requests_v1';
 
 export interface OfficeProfileData {
   officeName: string;
   officeLogo: string;
   officeSlogan: string;
   officeBase: string;
+}
+
+export interface PendingOfficeRegistrationRequest {
+  id: string;
+  // Step 1: Office Information
+  officeName: string;
+  officeCode: string;
+  wing: string;
+  officeBase: string;
+  officeSlogan: string;
+  officeLogo: string;
+  // Step 2: User Information
+  bdNo: string;
+  rank: string;
+  fullName: string;
+  surname: string;
+  trade: string;
+  flightName: string;
+  userRole: string;
+  contactNo: string;
+  pin: string;
+  // Step 3: Approval Status
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  createdAt: string;
+  updatedAt: string;
+  approvedAt?: string;
+  rejectedAt?: string;
+}
+
+export interface GlobalUserOfficeEntry {
+  bdNo: string;
+  userName: string;
+  rank: string;
+  flightName?: string;
+  trade?: string;
+  role?: string;
+  pin?: string;
+  officeCode: string;
+  officeName: string;
+  officeLogo: string;
+  officeSlogan: string;
+  officeBase: string;
+  isDefault155: boolean;
+  isPostedOut?: boolean;
+  active?: boolean;
+  officeConfig?: CustomOfficeConfig;
+  updatedAt: string;
 }
 
 export interface OfficeFirebaseConfig {
@@ -665,6 +715,36 @@ export function updateActiveOfficeProfile(profile: Partial<OfficeProfileData>): 
       document.title = `${nextProfile.officeName} | ${nextProfile.officeBase}`;
     } catch {}
 
+    // Also propagate updated Office Name, Logo, Slogan, Base to all users of this office in global user-office map
+    try {
+      const activeCode = String(current.officeCode || '155-UASU').toUpperCase().trim();
+      const map = getGlobalUserOfficeMap();
+      let mapModified = false;
+      Object.keys(map).forEach((bdKey) => {
+        const entry = map[bdKey];
+        if (entry && String(entry.officeCode || '').toUpperCase().trim() === activeCode) {
+          entry.officeName = nextProfile.officeName;
+          entry.officeLogo = nextProfile.officeLogo;
+          entry.officeSlogan = nextProfile.officeSlogan;
+          entry.officeBase = nextProfile.officeBase;
+          if (entry.officeConfig) {
+            entry.officeConfig = {
+              ...entry.officeConfig,
+              officeName: nextProfile.officeName,
+              officeLogo: nextProfile.officeLogo,
+              officeSlogan: nextProfile.officeSlogan,
+              officeBase: nextProfile.officeBase,
+            };
+          }
+          entry.updatedAt = new Date().toISOString();
+          mapModified = true;
+        }
+      });
+      if (mapModified) {
+        saveGlobalUserOfficeMap(map, true);
+      }
+    } catch {}
+
     window.dispatchEvent(new CustomEvent('baf_office_config_changed', { detail: nextProfile }));
     window.dispatchEvent(new Event('baf_logo_updated'));
     window.dispatchEvent(new CustomEvent('baf_settings_updated', { detail: { key: OFFICE_PROFILE_STORAGE_KEY } }));
@@ -1007,6 +1087,1243 @@ export async function fetchRegisteredOfficesFromMaster(): Promise<RegisteredOffi
   return Array.from(mergedMap.values()).sort(
     (a, b) => new Date(b.lastActive || 0).getTime() - new Date(a.lastActive || 0).getTime()
   );
+}
+
+// ============================================================================
+// 4. GLOBAL USER -> OFFICE DIRECTORY (Matches BD No to Office Name & Workspace)
+// ============================================================================
+export function getGlobalUserOfficeMap(): Record<string, GlobalUserOfficeEntry> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = getRawLocalStorageItem(GLOBAL_USER_OFFICE_MAP_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveGlobalUserOfficeMap(
+  map: Record<string, GlobalUserOfficeEntry>,
+  syncToCloud: boolean = true
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    setRawLocalStorageItem(GLOBAL_USER_OFFICE_MAP_KEY, JSON.stringify(map));
+  } catch {}
+
+  if (syncToCloud && masterDbInstance) {
+    setDoc(
+      doc(masterDbInstance, 'app_settings', GLOBAL_USER_OFFICE_MAP_KEY),
+      {
+        key: GLOBAL_USER_OFFICE_MAP_KEY,
+        value: JSON.stringify(map),
+        updated_at: new Date().toISOString(),
+      },
+      { merge: true }
+    ).catch(() => {});
+  }
+}
+
+export function registerUsersInGlobalOfficeDirectory(
+  users: Array<{
+    bdNo?: string;
+    userId?: string;
+    name?: string;
+    fullName?: string;
+    rank?: string;
+    flightName?: string;
+    trade?: string;
+    role?: string;
+    pin?: string;
+    password?: string;
+  }>,
+  officeIdentityOverride?: {
+    officeCode: string;
+    officeName: string;
+    officeLogo: string;
+    officeSlogan: string;
+    officeBase: string;
+    isDefault155: boolean;
+    officeConfig?: CustomOfficeConfig;
+  }
+): void {
+  if (!Array.isArray(users) || users.length === 0) return;
+
+  const activeIdentity = getActiveOfficeIdentity();
+  const customCfg = getCustomOfficeConfig();
+  const isDefault155 =
+    officeIdentityOverride !== undefined
+      ? officeIdentityOverride.isDefault155
+      : isDefault155UasuOffice();
+  const officeCode = String(
+    officeIdentityOverride?.officeCode || activeIdentity.officeCode || '155-UASU'
+  )
+    .toUpperCase()
+    .trim();
+  const officeName =
+    officeIdentityOverride?.officeName || activeIdentity.officeName || '155 UASU BAF';
+  const officeLogo =
+    officeIdentityOverride?.officeLogo || activeIdentity.officeLogo || '/155-uasu-baf-logo.png';
+  const officeSlogan =
+    officeIdentityOverride?.officeSlogan ||
+    activeIdentity.officeSlogan ||
+    'Intel • Surveillance • Strike';
+  const officeBase =
+    officeIdentityOverride?.officeBase || activeIdentity.officeBase || 'BAF BASE ZHR';
+  const resolvedConfig =
+    officeIdentityOverride?.officeConfig ||
+    (!isDefault155
+      ? customCfg || {
+          officeName,
+          officeLogo,
+          officeSlogan,
+          officeBase,
+          officeCode,
+          firebaseConfig: buildAutoCloudFirebaseConfig(officeName, officeCode),
+        }
+      : undefined);
+
+  const map = getGlobalUserOfficeMap();
+  const nowIso = new Date().toISOString();
+  let changed = false;
+
+  users.forEach((u) => {
+    const cleanBd = String(u.bdNo || u.userId || '')
+      .replace(/^BD\/?/i, '')
+      .replace(/[^0-9]/g, '')
+      .trim();
+    if (!cleanBd || cleanBd === MASTER_USER_ID || cleanBd === '53539919') return;
+
+    const existing = map[cleanBd];
+    const resolvedPin = String(u.pin || u.password || existing?.pin || cleanBd).trim();
+    const resolvedName = String(u.fullName || u.name || existing?.userName || 'Airman').trim();
+    const resolvedRank = String(u.rank || existing?.rank || 'LAC').trim();
+    const isPostedOut = isAirmanPostedOut(u);
+
+    map[cleanBd] = {
+      bdNo: cleanBd,
+      userName: resolvedName,
+      rank: resolvedRank,
+      flightName: u.flightName !== undefined ? u.flightName : (existing?.flightName || (isDefault155 ? 'Admin' : '')),
+      trade: u.trade || existing?.trade || 'General',
+      role: u.role || existing?.role || 'USER',
+      pin: resolvedPin,
+      officeCode,
+      officeName,
+      officeLogo,
+      officeSlogan,
+      officeBase,
+      isDefault155,
+      isPostedOut,
+      active: !isPostedOut,
+      ...(resolvedConfig ? { officeConfig: resolvedConfig } : {}),
+      updatedAt: nowIso,
+    };
+    changed = true;
+  });
+
+  if (changed) {
+    saveGlobalUserOfficeMap(map, true);
+  }
+}
+
+export function isAirmanPostedOut(record: any): boolean {
+  if (!record || typeof record !== 'object') return false;
+  if (record.isPostedOut === true) return true;
+  if (record.active === false) return true;
+  const statusStr = String(record.status || '').toUpperCase().trim();
+  if (statusStr === 'POSTED_OUT' || statusStr === 'POSTED OUT' || statusStr === 'INACTIVE') {
+    return true;
+  }
+  const leaveReasonStr = String(record.leaveReason || '').toLowerCase().trim();
+  if (leaveReasonStr === 'posted out' || leaveReasonStr === 'rtu' || leaveReasonStr === 'medical') {
+    if (record.active === false || Boolean(record.dateLeft)) return true;
+  }
+  if (Boolean(record.dateLeft) && record.active === false) {
+    return true;
+  }
+  return false;
+}
+
+export function isUserPostedOutInOfficeStorage(
+  cleanBd: string,
+  officeCode: string,
+  isDefault155: boolean,
+  fallbackAirmen: any[] = []
+): boolean {
+  if (!cleanBd) return false;
+  const safeCode = String(officeCode || '')
+    .toUpperCase()
+    .trim()
+    .replace(/[^A-Z0-9_-]/g, '_');
+
+  const checkDbKey = isDefault155 || safeCode === '155-UASU' || safeCode === '155_UASU'
+    ? 'baf_local_db_v3'
+    : `baf_local_db_v3__office_${safeCode}`;
+
+  try {
+    const rawDb = getRawLocalStorageItem(checkDbKey);
+    if (rawDb) {
+      const parsedDb = JSON.parse(rawDb);
+      if (parsedDb && Array.isArray(parsedDb.airmen)) {
+        const matches = parsedDb.airmen.filter((a: any) => {
+          const aBd = String(a.bdNo || '')
+            .replace(/^BD\/?/i, '')
+            .replace(/[^0-9]/g, '')
+            .trim();
+          return aBd === cleanBd;
+        });
+        if (matches.length > 0) {
+          // If any matching record is active, they are NOT posted out in this office
+          const hasActive = matches.some((m: any) => !isAirmanPostedOut(m));
+          return !hasActive;
+        }
+      }
+    }
+  } catch {}
+
+  if ((isDefault155 || safeCode === '155-UASU') && Array.isArray(fallbackAirmen) && fallbackAirmen.length > 0) {
+    const fMatches = fallbackAirmen.filter((a: any) => {
+      const aBd = String(a.bdNo || '')
+        .replace(/^BD\/?/i, '')
+        .replace(/[^0-9]/g, '')
+        .trim();
+      return aBd === cleanBd;
+    });
+    if (fMatches.length > 0) {
+      const hasActive = fMatches.some((m: any) => !isAirmanPostedOut(m));
+      return !hasActive;
+    }
+  }
+
+  return false;
+}
+
+export function markUserPostedOutInGlobalDirectory(bdInput: string, isPostedOut: boolean): void {
+  const cleanBd = String(bdInput || '')
+    .replace(/^BD\/?/i, '')
+    .replace(/[^0-9]/g, '')
+    .trim();
+  if (!cleanBd || cleanBd === MASTER_USER_ID) return;
+  const activeIdentity = getActiveOfficeIdentity();
+  const currentCode = String(activeIdentity.officeCode || '155-UASU').toUpperCase().trim();
+  const map = getGlobalUserOfficeMap();
+  if (map[cleanBd]) {
+    const entryCode = String(map[cleanBd].officeCode || '155-UASU').toUpperCase().trim();
+    if (entryCode === currentCode) {
+      map[cleanBd] = {
+        ...map[cleanBd],
+        isPostedOut,
+        active: !isPostedOut,
+        updatedAt: new Date().toISOString(),
+      };
+      saveGlobalUserOfficeMap(map, true);
+    }
+  }
+}
+
+export function isOfficeNameAlreadyRegistered(
+  officeNameInput: string,
+  registeredOffices: RegisteredOfficeRecord[] = [],
+  pendingRequests: PendingOfficeRegistrationRequest[] = []
+): boolean {
+  const normalizedInput = String(officeNameInput || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, ' ');
+  if (!normalizedInput) return false;
+  const inputCode = generateOfficeCodeFromName(normalizedInput).toUpperCase().trim();
+
+  // Check default 155 UASU BAF
+  const defProfile = getDefault155OfficeProfile();
+  const defNameNorm = String(defProfile.officeName || '155 UASU BAF')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, ' ');
+  if (
+    normalizedInput === defNameNorm ||
+    normalizedInput === '155 UASU BAF' ||
+    normalizedInput === '155 UASU' ||
+    inputCode === '155-UASU'
+  ) {
+    return true;
+  }
+
+  // Check local master cache + passed registeredOffices
+  const cacheMap = getLocalMasterOfficesCache();
+  const allReg = [...Object.values(cacheMap), ...registeredOffices];
+  for (const off of allReg) {
+    if (!off) continue;
+    const offName = String(off.officeName || '')
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, ' ');
+    const offCode = String(off.officeCode || off.firebaseConfig?.officeCode || '')
+      .trim()
+      .toUpperCase();
+    if (offName && (offName === normalizedInput || (inputCode && offCode === inputCode))) {
+      return true;
+    }
+  }
+
+  // Check pending requests (PENDING or APPROVED)
+  const localReqs = getPendingOfficeRequestsLocal();
+  const allReqs = [...localReqs, ...pendingRequests];
+  for (const req of allReqs) {
+    if (!req || req.status === 'REJECTED') continue;
+    const reqName = String(req.officeName || '')
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, ' ');
+    const reqCode = String(req.officeCode || '')
+      .trim()
+      .toUpperCase();
+    if (reqName && (reqName === normalizedInput || (inputCode && reqCode === inputCode))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function doesOfficeHaveFlights(
+  airmen?: Array<{ flightName?: string; active?: boolean }>
+): boolean {
+  if (!isDefault155UasuOffice()) {
+    return false;
+  }
+  if (Array.isArray(airmen) && airmen.length > 0) {
+    return airmen.some((a) => Boolean(String(a?.flightName || '').trim()));
+  }
+  return true;
+}
+
+function getDefault155OfficeProfile(): OfficeProfileData {
+  try {
+    const raw = getRawLocalStorageItem(OFFICE_PROFILE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return {
+          officeName: String(parsed.officeName || '155 UASU BAF').trim() || '155 UASU BAF',
+          officeLogo:
+            String(parsed.officeLogo || '/155-uasu-baf-logo.png').trim() ||
+            '/155-uasu-baf-logo.png',
+          officeSlogan:
+            String(parsed.officeSlogan || 'Intel • Surveillance • Strike').trim() ||
+            'Intel • Surveillance • Strike',
+          officeBase: String(parsed.officeBase || 'BAF BASE ZHR').trim() || 'BAF BASE ZHR',
+        };
+      }
+    }
+  } catch {}
+  return {
+    officeName: '155 UASU BAF',
+    officeLogo: '/155-uasu-baf-logo.png',
+    officeSlogan: 'Intel • Surveillance • Strike',
+    officeBase: 'BAF BASE ZHR',
+  };
+}
+
+export function findOfficeByUserId(
+  bdInput: string,
+  fallbackAirmen: Array<{
+    bdNo?: string;
+    name?: string;
+    fullName?: string;
+    rank?: string;
+    flightName?: string;
+    trade?: string;
+    role?: string;
+    active?: boolean;
+    dateLeft?: string;
+    leaveReason?: string;
+  }> = []
+): GlobalUserOfficeEntry | null {
+  const cleanBd = String(bdInput || '')
+    .replace(/^BD\/?/i, '')
+    .replace(/[^0-9]/g, '')
+    .trim();
+  if (!cleanBd) return null;
+
+  if (cleanBd === MASTER_USER_ID) {
+    const currentIdentity = getActiveOfficeIdentity();
+    return {
+      bdNo: MASTER_USER_ID,
+      userName: 'System Master Owner',
+      rank: 'MWO',
+      flightName: 'Admin',
+      trade: 'System Control',
+      role: 'master_owner',
+      pin: MASTER_USER_PIN,
+      officeCode: currentIdentity.officeCode || '155-UASU',
+      officeName: currentIdentity.officeName || '155 UASU BAF',
+      officeLogo: currentIdentity.officeLogo || '/155-uasu-baf-logo.png',
+      officeSlogan: currentIdentity.officeSlogan || 'Intel • Surveillance • Strike',
+      officeBase: currentIdentity.officeBase || 'BAF BASE ZHR',
+      isDefault155: !currentIdentity.isCustom,
+      officeConfig: getCustomOfficeConfig() || undefined,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  // 1. Check Global User -> Office Map first (instant lookup across all registered offices)
+  const globalMap = getGlobalUserOfficeMap();
+  if (globalMap[cleanBd]) {
+    const hit = globalMap[cleanBd];
+    const postedOutInHitOffice =
+      hit.isPostedOut === true ||
+      hit.active === false ||
+      isUserPostedOutInOfficeStorage(cleanBd, hit.officeCode, hit.isDefault155, fallbackAirmen);
+
+    if (!postedOutInHitOffice) {
+      const officesCache = getLocalMasterOfficesCache();
+      const matchedRegOffice = Object.values(officesCache).find(
+        (r) =>
+          String(r.officeCode || r.firebaseConfig?.officeCode || '')
+            .toUpperCase()
+            .trim() === String(hit.officeCode || '').toUpperCase().trim()
+      );
+      if (matchedRegOffice && !hit.isDefault155) {
+        return {
+          ...hit,
+          officeName: matchedRegOffice.officeName || hit.officeName,
+          officeLogo: matchedRegOffice.officeLogo || hit.officeLogo,
+          officeSlogan:
+            matchedRegOffice.officeSlogan ||
+            matchedRegOffice.firebaseConfig?.officeSlogan ||
+            hit.officeSlogan,
+          officeBase:
+            matchedRegOffice.officeBase ||
+            matchedRegOffice.firebaseConfig?.officeBase ||
+            hit.officeBase,
+          officeConfig:
+            hit.officeConfig || {
+              officeName: matchedRegOffice.officeName,
+              officeLogo: matchedRegOffice.officeLogo || '/155-uasu-baf-logo.png',
+              officeSlogan: matchedRegOffice.officeSlogan,
+              officeBase: matchedRegOffice.officeBase,
+              officeCode: matchedRegOffice.officeCode,
+              joinPin: matchedRegOffice.joinPin,
+              firebaseConfig: matchedRegOffice.firebaseConfig,
+            },
+        };
+      }
+      return hit;
+    }
+  }
+
+  // 2. Scan any custom office localStorage keys (`baf_detailed_user_logins__office_<CODE>` & `baf_local_db_v3__office_<CODE>`)
+  if (typeof window !== 'undefined' && window.localStorage) {
+    const officesCache = getLocalMasterOfficesCache();
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k) continue;
+      if (k.startsWith('baf_detailed_user_logins__office_')) {
+        const safeCode = k.replace('baf_detailed_user_logins__office_', '').trim();
+        if (!safeCode) continue;
+        if (isUserPostedOutInOfficeStorage(cleanBd, safeCode, false, fallbackAirmen)) {
+          continue;
+        }
+        try {
+          const rawUsers = getRawLocalStorageItem(k);
+          if (!rawUsers) continue;
+          const users = JSON.parse(rawUsers);
+          if (!Array.isArray(users)) continue;
+          const foundUser = users.find((u: any) => {
+            const uBd = String(u.bdNo || u.userId || '')
+              .replace(/^BD\/?/i, '')
+              .replace(/[^0-9]/g, '')
+              .trim();
+            return uBd === cleanBd && !isAirmanPostedOut(u);
+          });
+          if (foundUser) {
+            const rawProf = getRawLocalStorageItem(`${OFFICE_PROFILE_STORAGE_KEY}__office_${safeCode}`);
+            const prof = rawProf ? JSON.parse(rawProf) : null;
+            const regOffice = Object.values(officesCache).find(
+              (r) =>
+                String(r.officeCode || r.firebaseConfig?.officeCode || '')
+                  .toUpperCase()
+                  .replace(/[^A-Z0-9_-]/g, '_') === safeCode
+            );
+            const officeCode = regOffice?.officeCode || safeCode;
+            const officeName =
+              prof?.officeName || regOffice?.officeName || safeCode.replace(/_/g, ' ');
+            const officeLogo =
+              prof?.officeLogo || regOffice?.officeLogo || '/155-uasu-baf-logo.png';
+            const officeSlogan =
+              prof?.officeSlogan ||
+              regOffice?.officeSlogan ||
+              'Intel • Surveillance • Strike';
+            const officeBase =
+              prof?.officeBase || regOffice?.officeBase || 'BAF BASE ZHR';
+            const fbCfg =
+              regOffice?.firebaseConfig || buildAutoCloudFirebaseConfig(officeName, officeCode);
+
+            const entry: GlobalUserOfficeEntry = {
+              bdNo: cleanBd,
+              userName: foundUser.fullName || foundUser.name || 'Airman',
+              rank: foundUser.rank || 'LAC',
+              flightName: foundUser.flightName || '',
+              trade: foundUser.trade || 'General',
+              role: foundUser.role || 'USER',
+              pin: String(foundUser.pin || foundUser.password || cleanBd),
+              officeCode,
+              officeName,
+              officeLogo,
+              officeSlogan,
+              officeBase,
+              isDefault155: false,
+              isPostedOut: false,
+              active: true,
+              officeConfig: {
+                officeName,
+                officeLogo,
+                officeSlogan,
+                officeBase,
+                officeCode,
+                firebaseConfig: fbCfg,
+              },
+              updatedAt: new Date().toISOString(),
+            };
+            globalMap[cleanBd] = entry;
+            saveGlobalUserOfficeMap(globalMap, false);
+            return entry;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  // 3. Check Default 155 UASU BAF (raw unscoped keys + fallbackAirmen) if NOT posted out in 155 UASU
+  const isPostedOut155 = isUserPostedOutInOfficeStorage(cleanBd, '155-UASU', true, fallbackAirmen);
+  if (!isPostedOut155) {
+    const defProfile = getDefault155OfficeProfile();
+    try {
+      const raw155Users = getRawLocalStorageItem('baf_detailed_user_logins');
+      if (raw155Users) {
+        const parsed155 = JSON.parse(raw155Users);
+        if (Array.isArray(parsed155)) {
+          const uMatch = parsed155.find((u: any) => {
+            const uBd = String(u.bdNo || u.userId || '')
+              .replace(/^BD\/?/i, '')
+              .replace(/[^0-9]/g, '')
+              .trim();
+            return uBd === cleanBd && !isAirmanPostedOut(u);
+          });
+          if (uMatch) {
+            return {
+              bdNo: cleanBd,
+              userName: uMatch.fullName || uMatch.name || 'Airman',
+              rank: uMatch.rank || 'LAC',
+              flightName: uMatch.flightName || 'Admin',
+              trade: uMatch.trade || 'General',
+              role: uMatch.role || 'USER',
+              pin: String(uMatch.pin || uMatch.password || cleanBd),
+              officeCode: '155-UASU',
+              officeName: defProfile.officeName,
+              officeLogo: defProfile.officeLogo,
+              officeSlogan: defProfile.officeSlogan,
+              officeBase: defProfile.officeBase,
+              isDefault155: true,
+              isPostedOut: false,
+              active: true,
+              updatedAt: new Date().toISOString(),
+            };
+          }
+        }
+      }
+    } catch {}
+
+    try {
+      const raw155Db = getRawLocalStorageItem('baf_local_db_v3');
+      if (raw155Db) {
+        const parsedDb = JSON.parse(raw155Db);
+        if (parsedDb && Array.isArray(parsedDb.airmen)) {
+          const aMatch = parsedDb.airmen.find((a: any) => {
+            const aBd = String(a.bdNo || '')
+              .replace(/^BD\/?/i, '')
+              .replace(/[^0-9]/g, '')
+              .trim();
+            return aBd === cleanBd && !isAirmanPostedOut(a);
+          });
+          if (aMatch) {
+            return {
+              bdNo: cleanBd,
+              userName: aMatch.fullName || aMatch.name || 'Airman',
+              rank: aMatch.rank || 'LAC',
+              flightName: aMatch.flightName || 'Admin',
+              trade: aMatch.trade || 'General',
+              role: aMatch.role || 'USER',
+              pin: cleanBd,
+              officeCode: '155-UASU',
+              officeName: defProfile.officeName,
+              officeLogo: defProfile.officeLogo,
+              officeSlogan: defProfile.officeSlogan,
+              officeBase: defProfile.officeBase,
+              isDefault155: true,
+              isPostedOut: false,
+              active: true,
+              updatedAt: new Date().toISOString(),
+            };
+          }
+        }
+      }
+    } catch {}
+
+    if (Array.isArray(fallbackAirmen) && fallbackAirmen.length > 0) {
+      const fMatch = fallbackAirmen.find((a) => {
+        const aBd = String(a.bdNo || '')
+          .replace(/^BD\/?/i, '')
+          .replace(/[^0-9]/g, '')
+          .trim();
+        return aBd === cleanBd && !isAirmanPostedOut(a);
+      });
+      if (fMatch) {
+        return {
+          bdNo: cleanBd,
+          userName: fMatch.fullName || fMatch.name || 'Airman',
+          rank: fMatch.rank || 'LAC',
+          flightName: fMatch.flightName || 'Admin',
+          trade: fMatch.trade || 'General',
+          role: fMatch.role || 'USER',
+          pin: cleanBd,
+          officeCode: '155-UASU',
+          officeName: defProfile.officeName,
+          officeLogo: defProfile.officeLogo,
+          officeSlogan: defProfile.officeSlogan,
+          officeBase: defProfile.officeBase,
+          isDefault155: true,
+          isPostedOut: false,
+          active: true,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+export function activateMatchedOfficeForUser(match: GlobalUserOfficeEntry): boolean {
+  if (!match) return false;
+  const currentCode = getActiveOfficeCode();
+  const targetCode = String(match.officeCode || '155-UASU').toUpperCase().trim();
+  const isTarget155 =
+    match.isDefault155 || targetCode === '155-UASU' || targetCode === '155UASU';
+
+  if (isTarget155) {
+    if (!isDefault155UasuOffice()) {
+      clearCustomOfficeConfig();
+      return true;
+    }
+    return false;
+  }
+
+  const fbConfig =
+    match.officeConfig?.firebaseConfig ||
+    buildAutoCloudFirebaseConfig(match.officeName, targetCode);
+  const nextCustomConfig: CustomOfficeConfig = {
+    officeName: match.officeName,
+    officeLogo: match.officeLogo || '/155-uasu-baf-logo.png',
+    officeSlogan: match.officeSlogan || 'Intel • Surveillance • Strike',
+    officeBase: match.officeBase || 'BAF BASE ZHR',
+    officeCode: targetCode,
+    joinPin: match.officeConfig?.joinPin,
+    firebaseConfig: {
+      ...fbConfig,
+      officeCode: targetCode,
+      officeSlogan: match.officeSlogan || 'Intel • Surveillance • Strike',
+      officeBase: match.officeBase || 'BAF BASE ZHR',
+    },
+    configuredAt: match.officeConfig?.configuredAt || new Date().toISOString(),
+    adminUserId: match.bdNo,
+  };
+
+  const switched = currentCode !== targetCode || isDefault155UasuOffice();
+  saveCustomOfficeConfig(nextCustomConfig);
+  updateActiveOfficeProfile({
+    officeName: match.officeName,
+    officeLogo: match.officeLogo || '/155-uasu-baf-logo.png',
+    officeSlogan: match.officeSlogan || 'Intel • Surveillance • Strike',
+    officeBase: match.officeBase || 'BAF BASE ZHR',
+  });
+  return switched;
+}
+
+export async function syncGlobalUserOfficeMapFromCloud(): Promise<Record<string, GlobalUserOfficeEntry>> {
+  const localMap = getGlobalUserOfficeMap();
+  if (!masterDbInstance) return localMap;
+
+  try {
+    // 1. Fetch registered_offices so we have office metadata
+    const registeredOffices = await fetchRegisteredOfficesFromMaster().catch(() => []);
+    const officeByCode = new Map<string, RegisteredOfficeRecord>();
+    registeredOffices.forEach((o) => {
+      const c = String(o.officeCode || o.firebaseConfig?.officeCode || generateOfficeCodeFromName(o.officeName))
+        .toUpperCase()
+        .trim();
+      officeByCode.set(c, o);
+    });
+
+    // 2. Fetch app_settings/baf_global_user_office_map_v1
+    const snap = await getDoc(doc(masterDbInstance, 'app_settings', GLOBAL_USER_OFFICE_MAP_KEY));
+    if (snap.exists()) {
+      const data = snap.data();
+      if (data?.value) {
+        const cloudMap = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+        if (cloudMap && typeof cloudMap === 'object') {
+          Object.entries(cloudMap).forEach(([bdKey, entry]: [string, any]) => {
+            if (entry && entry.bdNo) {
+              localMap[bdKey] = {
+                ...entry,
+                ...(localMap[bdKey] &&
+                new Date(localMap[bdKey].updatedAt || 0).getTime() >
+                  new Date(entry.updatedAt || 0).getTime()
+                  ? localMap[bdKey]
+                  : {}),
+              };
+            }
+          });
+        }
+      }
+    }
+
+    // 3. Also scan Firestore user_profiles for any off_<CODE>__<bdNo> documents
+    const usersSnap = await getDocs(collection(masterDbInstance, 'user_profiles')).catch(() => null);
+    if (usersSnap) {
+      usersSnap.forEach((docSnap) => {
+        const docId = docSnap.id;
+        const d = docSnap.data() as any;
+        if (!d) return;
+        const cleanBd = String(d.bdNo || d.user_id || '')
+          .replace(/^BD\/?/i, '')
+          .replace(/[^0-9]/g, '')
+          .trim();
+        if (!cleanBd || cleanBd === MASTER_USER_ID || cleanBd === '53539919') return;
+
+        if (docId.startsWith('off_') && docId.includes('__')) {
+          const safeCode = docId.slice(4, docId.indexOf('__')).toUpperCase().trim();
+          const matchedOffice =
+            officeByCode.get(safeCode) ||
+            Array.from(officeByCode.values()).find(
+              (r) =>
+                String(r.officeCode || '')
+                  .toUpperCase()
+                  .replace(/[^A-Z0-9_-]/g, '_') === safeCode
+            );
+          const officeCode = matchedOffice?.officeCode || safeCode;
+          const officeName = matchedOffice?.officeName || safeCode.replace(/_/g, ' ');
+          const officeLogo = matchedOffice?.officeLogo || '/155-uasu-baf-logo.png';
+          const officeSlogan =
+            matchedOffice?.officeSlogan ||
+            matchedOffice?.firebaseConfig?.officeSlogan ||
+            'Intel • Surveillance • Strike';
+          const officeBase =
+            matchedOffice?.officeBase ||
+            matchedOffice?.firebaseConfig?.officeBase ||
+            'BAF BASE ZHR';
+          const fbConfig =
+            matchedOffice?.firebaseConfig || buildAutoCloudFirebaseConfig(officeName, officeCode);
+
+          localMap[cleanBd] = {
+            bdNo: cleanBd,
+            userName: d.name || 'Airman',
+            rank: d.rank || 'LAC',
+            flightName: d.flightName || 'Admin',
+            trade: d.trade || 'General',
+            role: d.role || 'USER',
+            pin: String(d.password || d.pin || cleanBd),
+            officeCode,
+            officeName,
+            officeLogo,
+            officeSlogan,
+            officeBase,
+            isDefault155: false,
+            officeConfig: {
+              officeName,
+              officeLogo,
+              officeSlogan,
+              officeBase,
+              officeCode,
+              firebaseConfig: fbConfig,
+            },
+            updatedAt: d.updatedAt || new Date().toISOString(),
+          };
+        } else if (!localMap[cleanBd]) {
+          const defProf = getDefault155OfficeProfile();
+          localMap[cleanBd] = {
+            bdNo: cleanBd,
+            userName: d.name || 'Airman',
+            rank: d.rank || 'LAC',
+            flightName: d.flightName || 'Admin',
+            trade: d.trade || 'General',
+            role: d.role || 'USER',
+            pin: String(d.password || d.pin || cleanBd),
+            officeCode: '155-UASU',
+            officeName: defProf.officeName,
+            officeLogo: defProf.officeLogo,
+            officeSlogan: defProf.officeSlogan,
+            officeBase: defProf.officeBase,
+            isDefault155: true,
+            updatedAt: d.updatedAt || new Date().toISOString(),
+          };
+        }
+      });
+    }
+
+    saveGlobalUserOfficeMap(localMap, false);
+  } catch {}
+
+  return localMap;
+}
+
+// ============================================================================
+// 5. NEW OFFICE REGISTRATION APPROVAL WORKFLOW (3-Step Submit -> Master Approve)
+// ============================================================================
+export function getPendingOfficeRequestsLocal(): PendingOfficeRegistrationRequest[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = getRawLocalStorageItem(PENDING_OFFICE_REQUESTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function savePendingOfficeRequestsLocal(
+  list: PendingOfficeRegistrationRequest[],
+  syncToCloud: boolean = true,
+  emitEvent: boolean = true
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    setRawLocalStorageItem(PENDING_OFFICE_REQUESTS_KEY, JSON.stringify(list));
+    if (emitEvent) {
+      window.dispatchEvent(new CustomEvent('baf_pending_office_requests_updated', { detail: list }));
+    }
+  } catch {}
+
+  if (syncToCloud && masterDbInstance) {
+    setDoc(
+      doc(masterDbInstance, 'app_settings', PENDING_OFFICE_REQUESTS_KEY),
+      {
+        key: PENDING_OFFICE_REQUESTS_KEY,
+        settingKey: PENDING_OFFICE_REQUESTS_KEY,
+        value: JSON.stringify(list),
+        updated_at: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    ).catch(() => {});
+  }
+}
+
+export async function fetchPendingOfficeRequestsFromMaster(): Promise<PendingOfficeRegistrationRequest[]> {
+  const localList = getPendingOfficeRequestsLocal();
+  const byId = new Map<string, PendingOfficeRegistrationRequest>();
+  localList.forEach((item) => {
+    if (item && item.id) byId.set(item.id, item);
+  });
+
+  if (masterDbInstance) {
+    try {
+      const snap = await getDoc(doc(masterDbInstance, 'app_settings', PENDING_OFFICE_REQUESTS_KEY));
+      if (snap.exists()) {
+        const data = snap.data();
+        const rawVal = data?.value;
+        if (rawVal) {
+          let cloudList: any = rawVal;
+          if (typeof rawVal === 'string') {
+            try {
+              cloudList = JSON.parse(rawVal);
+            } catch {}
+          } else if (rawVal && typeof rawVal === 'object' && Array.isArray(rawVal.data)) {
+            cloudList = rawVal.data;
+          }
+          if (Array.isArray(cloudList)) {
+            cloudList.forEach((item: PendingOfficeRegistrationRequest) => {
+              if (!item || !item.id) return;
+              const existing = byId.get(item.id);
+              if (
+                !existing ||
+                new Date(item.updatedAt || 0).getTime() >= new Date(existing.updatedAt || 0).getTime()
+              ) {
+                byId.set(item.id, item);
+              }
+            });
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const merged = Array.from(byId.values()).sort(
+    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  );
+  savePendingOfficeRequestsLocal(merged, false, false);
+  return merged;
+}
+
+export async function submitOfficeRegistrationRequest(input: {
+  officeName: string;
+  wing: string;
+  officeBase: string;
+  officeSlogan: string;
+  officeLogo: string;
+  bdNo: string;
+  rank: string;
+  fullName: string;
+  surname: string;
+  trade: string;
+  flightName: string;
+  userRole: string;
+  contactNo: string;
+  pin?: string;
+}): Promise<PendingOfficeRegistrationRequest> {
+  const cleanBd = String(input.bdNo || '')
+    .replace(/^BD\/?/i, '')
+    .replace(/[^0-9]/g, '')
+    .trim();
+  const cleanOfficeName = String(input.officeName || '').trim();
+  const officeCode = generateOfficeCodeFromName(cleanOfficeName);
+  const nowIso = new Date().toISOString();
+
+  const existingList = await fetchPendingOfficeRequestsFromMaster().catch(() =>
+    getPendingOfficeRequestsLocal()
+  );
+
+  // Check if there is already a pending request for the same BD No + Office Code
+  const existingIdx = existingList.findIndex(
+    (r) =>
+      r.bdNo === cleanBd &&
+      r.officeCode.toUpperCase() === officeCode.toUpperCase() &&
+      r.status === 'PENDING'
+  );
+
+  const reqRecord: PendingOfficeRegistrationRequest = {
+    id:
+      existingIdx >= 0
+        ? existingList[existingIdx].id
+        : `off_req_${officeCode}_${cleanBd}_${Date.now()}`,
+    officeName: cleanOfficeName,
+    officeCode,
+    wing: String(input.wing || '').trim(),
+    officeBase: String(input.officeBase || 'BAF BASE ZHR').trim() || 'BAF BASE ZHR',
+    officeSlogan:
+      String(input.officeSlogan || 'Intel • Surveillance • Strike').trim() ||
+      'Intel • Surveillance • Strike',
+    officeLogo:
+      String(input.officeLogo || '/155-uasu-baf-logo.png').trim() || '/155-uasu-baf-logo.png',
+    bdNo: cleanBd,
+    rank: String(input.rank || 'LAC').trim() || 'LAC',
+    fullName: String(input.fullName || '').trim(),
+    surname: String(input.surname || input.fullName || '').trim(),
+    trade: String(input.trade || 'Radio Fitt').trim() || 'Radio Fitt',
+    flightName: String(input.flightName || '').trim(),
+    userRole: String(input.userRole || 'SUPER_ADMIN').trim() || 'SUPER_ADMIN',
+    contactNo: String(input.contactNo || '').trim(),
+    pin: String(input.pin || cleanBd).trim() || cleanBd,
+    status: 'PENDING',
+    createdAt: existingIdx >= 0 ? existingList[existingIdx].createdAt : nowIso,
+    updatedAt: nowIso,
+  };
+
+  if (existingIdx >= 0) {
+    existingList[existingIdx] = reqRecord;
+  } else {
+    existingList.unshift(reqRecord);
+  }
+
+  savePendingOfficeRequestsLocal(existingList, true);
+  return reqRecord;
+}
+
+export async function approveOfficeRegistrationRequest(
+  requestId: string
+): Promise<PendingOfficeRegistrationRequest | null> {
+  const list = await fetchPendingOfficeRequestsFromMaster().catch(() =>
+    getPendingOfficeRequestsLocal()
+  );
+  const idx = list.findIndex((r) => r.id === requestId);
+  if (idx === -1) return null;
+
+  const req = list[idx];
+  const nowIso = new Date().toISOString();
+  const officeCode = String(req.officeCode || generateOfficeCodeFromName(req.officeName))
+    .toUpperCase()
+    .trim();
+  const safeCode = officeCode.replace(/[^A-Z0-9_-]/g, '_');
+  const cleanBd = String(req.bdNo || '')
+    .replace(/^BD\/?/i, '')
+    .replace(/[^0-9]/g, '')
+    .trim();
+  const displaySurname = String(req.surname || req.fullName || 'Airman').trim();
+  const displayFullName = String(req.fullName || req.surname || 'Airman').trim();
+  const userPin = String(req.pin || cleanBd).trim() || cleanBd;
+  const userRole = String(req.userRole || 'SUPER_ADMIN').trim() || 'SUPER_ADMIN';
+
+  // 1. Save Scoped Office Profile (`baf_office_profile_v1__office_${safeCode}`)
+  const officeProfilePayload: OfficeProfileData = {
+    officeName: req.officeName,
+    officeLogo: req.officeLogo || '/155-uasu-baf-logo.png',
+    officeSlogan: req.officeSlogan || 'Intel • Surveillance • Strike',
+    officeBase: req.officeBase || 'BAF BASE ZHR',
+  };
+  setRawLocalStorageItem(
+    `${OFFICE_PROFILE_STORAGE_KEY}__office_${safeCode}`,
+    JSON.stringify(officeProfilePayload)
+  );
+
+  // 2. Build Biodata Register (`Airman`) & User Management (`DetailedUserLogin`) records
+  const airmanId = `airman-${cleanBd}`;
+  const shortCode =
+    displaySurname
+      .replace(/[^a-zA-Z]/g, '')
+      .slice(0, 3)
+      .toUpperCase() || 'USR';
+
+  const newAirmanRecord = {
+    id: airmanId,
+    serNo: 1,
+    seniority: 1,
+    code: shortCode,
+    bdNo: cleanBd,
+    rank: req.rank || 'LAC',
+    fullName: displayFullName,
+    name: displaySurname,
+    trade: req.trade || 'Radio Fitt',
+    addressBlock: req.officeBase || 'BAF BASE ZHR',
+    mobileNo: req.contactNo || '',
+    flightName: req.flightName || '',
+    remarks: `Approved Office Registration (${req.officeName})`,
+    active: true,
+    sqn: req.officeName,
+    wing: req.wing || '',
+    role: userRole,
+    status: 'Active',
+    medicalCategory: 'AYE',
+    basicCategory: 'B1',
+  };
+
+  const masterUserRecord = {
+    id: 'user-login-48456',
+    userId: MASTER_USER_ID,
+    airmanId: 'airman-48456',
+    bdNo: MASTER_USER_ID,
+    rank: 'Master',
+    name: 'System Master Owner',
+    flightName: '',
+    trade: 'System Control',
+    role: 'master_owner',
+    pin: MASTER_USER_PIN,
+    password: MASTER_USER_PIN,
+    adminPass: '1124',
+    ownerPass: '1124',
+    isProtected: true,
+    status: 'ACTIVE',
+    detailOrder: 'MASTER-OWNER-PROTECTED',
+    detailedAt: nowIso,
+    detailedBy: 'System Auto-Provision',
+    remarks: 'Protected System Master Owner Account',
+    updatedAt: nowIso,
+  };
+
+  const requesterUserRecord = {
+    id: `user-login-${cleanBd}`,
+    userId: cleanBd,
+    airmanId,
+    bdNo: cleanBd,
+    rank: req.rank || 'LAC',
+    name: displaySurname,
+    fullName: displayFullName,
+    mobileNo: req.contactNo || '',
+    flightName: req.flightName || '',
+    trade: req.trade || 'Radio Fitt',
+    role: userRole,
+    pin: userPin,
+    password: userPin,
+    adminPass: '1124',
+    status: 'ACTIVE',
+    detailOrder: `DO-${officeCode}/APPROVED/${cleanBd}`,
+    detailedAt: nowIso,
+    detailedBy: 'Master Admin Approval',
+    remarks: `${req.officeName}${req.wing ? ` (${req.wing})` : ''} • ${displayFullName}`,
+    updatedAt: nowIso,
+  };
+
+  // 3. Write Scoped User Management (`baf_detailed_user_logins__office_${safeCode}`)
+  const scopedUsersKey = `baf_detailed_user_logins__office_${safeCode}`;
+  let existingOfficeUsers: any[] = [];
+  try {
+    const rawU = getRawLocalStorageItem(scopedUsersKey);
+    if (rawU) {
+      const p = JSON.parse(rawU);
+      if (Array.isArray(p)) existingOfficeUsers = p;
+    }
+  } catch {}
+  const filteredUsers = existingOfficeUsers.filter(
+    (u) =>
+      String(u.bdNo || u.userId || '').replace(/^BD\/?/i, '').trim() !== cleanBd &&
+      String(u.bdNo || u.userId || '').replace(/^BD\/?/i, '').trim() !== MASTER_USER_ID
+  );
+  const updatedOfficeUsers = [masterUserRecord, requesterUserRecord, ...filteredUsers];
+  setRawLocalStorageItem(scopedUsersKey, JSON.stringify(updatedOfficeUsers));
+
+  // 4. Write Scoped Local Database (`baf_local_db_v3__office_${safeCode}`) for Biodata Register
+  const scopedDbKey = `baf_local_db_v3__office_${safeCode}`;
+  let officeDbObj: any = {
+    airmen: [newAirmanRecord],
+    assignments: [],
+    leaves: [],
+    tdyRecords: [],
+    deployments: [],
+    dutyHistory: {},
+    detailedUsers: updatedOfficeUsers,
+    dutyTypes: [],
+    flightConfigs: [],
+    paradeStates: {},
+    settings: {
+      [OFFICE_PROFILE_STORAGE_KEY]: JSON.stringify(officeProfilePayload),
+    },
+    lastUpdated: Date.now(),
+  };
+  try {
+    const rawDb = getRawLocalStorageItem(scopedDbKey);
+    if (rawDb) {
+      const parsedDb = JSON.parse(rawDb);
+      if (parsedDb && typeof parsedDb === 'object') {
+        const existingAirmen = Array.isArray(parsedDb.airmen) ? parsedDb.airmen : [];
+        const otherAirmen = existingAirmen.filter(
+          (a: any) => String(a.bdNo || '').replace(/^BD\/?/i, '').trim() !== cleanBd
+        );
+        officeDbObj = {
+          ...parsedDb,
+          airmen: [newAirmanRecord, ...otherAirmen],
+          detailedUsers: updatedOfficeUsers,
+          settings: {
+            ...(parsedDb.settings || {}),
+            [OFFICE_PROFILE_STORAGE_KEY]: JSON.stringify(officeProfilePayload),
+          },
+          lastUpdated: Date.now(),
+        };
+      }
+    }
+  } catch {}
+  setRawLocalStorageItem(scopedDbKey, JSON.stringify(officeDbObj));
+
+  // 5. Sync Approved Office, Biodata Register & User Management to Firestore (`masterDbInstance`)
+  const fbConfig = {
+    ...buildAutoCloudFirebaseConfig(req.officeName, officeCode),
+    officeSlogan: officeProfilePayload.officeSlogan,
+    officeBase: officeProfilePayload.officeBase,
+  };
+
+  await registerOfficeInMasterTelemetry(
+    {
+      officeName: req.officeName,
+      officeLogo: officeProfilePayload.officeLogo,
+      officeSlogan: officeProfilePayload.officeSlogan,
+      officeBase: officeProfilePayload.officeBase,
+      officeCode,
+      firebaseConfig: fbConfig,
+      totalUsers: officeDbObj.airmen.length || 1,
+    },
+    officeDbObj.airmen.length || 1
+  ).catch(() => {});
+
+  if (masterDbInstance) {
+    try {
+      const docPrefix = `off_${safeCode}__`;
+      await Promise.all([
+        setDoc(
+          doc(masterDbInstance, 'airmen', `${docPrefix}${airmanId}`),
+          {
+            ...newAirmanRecord,
+            updated_at: nowIso,
+          },
+          { merge: true }
+        ),
+        setDoc(
+          doc(masterDbInstance, 'user_profiles', `${docPrefix}user-login-${cleanBd}`),
+          {
+            ...requesterUserRecord,
+            user_id: cleanBd,
+            updated_at: nowIso,
+          },
+          { merge: true }
+        ),
+        setDoc(
+          doc(masterDbInstance, 'app_settings', `${docPrefix}${OFFICE_PROFILE_STORAGE_KEY}`),
+          {
+            key: OFFICE_PROFILE_STORAGE_KEY,
+            value: JSON.stringify(officeProfilePayload),
+            updated_at: nowIso,
+          },
+          { merge: true }
+        ),
+      ]);
+    } catch {}
+  }
+
+  // 6. Index the approved User -> Office mapping in Global User-Office Directory
+  const customOfficeCfg: CustomOfficeConfig = {
+    officeName: req.officeName,
+    officeLogo: officeProfilePayload.officeLogo,
+    officeSlogan: officeProfilePayload.officeSlogan,
+    officeBase: officeProfilePayload.officeBase,
+    officeCode,
+    firebaseConfig: fbConfig,
+    configuredAt: nowIso,
+    adminUserId: cleanBd,
+  };
+
+  registerUsersInGlobalOfficeDirectory([requesterUserRecord], {
+    officeCode,
+    officeName: req.officeName,
+    officeLogo: officeProfilePayload.officeLogo,
+    officeSlogan: officeProfilePayload.officeSlogan,
+    officeBase: officeProfilePayload.officeBase,
+    isDefault155: false,
+    officeConfig: customOfficeCfg,
+  });
+
+  // 7. Update request status to APPROVED
+  const approvedReq: PendingOfficeRegistrationRequest = {
+    ...req,
+    status: 'APPROVED',
+    approvedAt: nowIso,
+    updatedAt: nowIso,
+  };
+  list[idx] = approvedReq;
+  savePendingOfficeRequestsLocal(list, true);
+
+  return approvedReq;
+}
+
+export async function rejectOfficeRegistrationRequest(
+  requestId: string
+): Promise<PendingOfficeRegistrationRequest | null> {
+  const list = await fetchPendingOfficeRequestsFromMaster().catch(() =>
+    getPendingOfficeRequestsLocal()
+  );
+  const idx = list.findIndex((r) => r.id === requestId);
+  if (idx === -1) return null;
+
+  const nowIso = new Date().toISOString();
+  const rejectedReq: PendingOfficeRegistrationRequest = {
+    ...list[idx],
+    status: 'REJECTED',
+    rejectedAt: nowIso,
+    updatedAt: nowIso,
+  };
+  list[idx] = rejectedReq;
+  savePendingOfficeRequestsLocal(list, true);
+  return rejectedReq;
 }
 
 // ============================================================================
