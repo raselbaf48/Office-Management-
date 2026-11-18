@@ -2062,12 +2062,10 @@ ${combinedText.substring(0, 30000)}
   });
 
 // 8.1. Direct Load Official 155 UASU Parade State Roster (01 Jul - 31 Aug)
-  app.use((req, res, next) => {
-    if (!req.path.startsWith('/node_modules/.vite/')) {
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-    }
+  app.use('/api', (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     next();
   });
 

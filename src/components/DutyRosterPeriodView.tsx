@@ -27,6 +27,7 @@ import {
  PenTool,
 } from 'lucide-react';
 import { Logo155UASU } from './Logo155UASU';
+import { getActiveOfficeIdentity } from '../firebase';
 import {
   IdacSignatureModal,
   IdacSignatureDetails,
@@ -369,7 +370,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  block: formatBlockName(block.airman.addressBlock),
  mobileNo: block.airman.mobileNo || '-',
  dateStr: dateRangeStr,
- section: '155 UASU',
+ section: getActiveOfficeIdentity().officeName,
  });
  serCounter++;
  });
@@ -542,20 +543,21 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  const handleExportDocx = async () => {
  setIsExportingDocx(true);
  try {
+ const activeOfficeName = getActiveOfficeIdentity().officeName || '155 UASU BAF';
  if (rosterMode === 'BASE_DUTIES') {
  await exportDutyRosterDocx(
- '155 UASU, BAF',
+ activeOfficeName,
  headerDateRange,
  baseDutiesSections,
- `Base_Duties_Roster_155_UASU_${fromDate}_to_${toDate}.docx`
+ `Base_Duties_Roster_${activeOfficeName.replace(/\s+/g, '_')}_${fromDate}_to_${toDate}.docx`
  );
  } else {
  const dateSub = weekPreset === 'FULL_MONTH' ? formatMonthNameDisplay(fromDate) : headerDateRange;
  await exportIdacRosterDocx(
- '155 UASU BAF',
+ activeOfficeName,
  dateSub,
  idacRosterRows,
- `IDAC_Duty_Roster_155_UASU_${weekPreset === 'FULL_MONTH' ? fromDate.slice(0, 7) : `${fromDate}_to_${toDate}`}.docx`,
+ `IDAC_Duty_Roster_${activeOfficeName.replace(/\s+/g, '_')}_${weekPreset === 'FULL_MONTH' ? fromDate.slice(0, 7) : `${fromDate}_to_${toDate}`}.docx`,
  idacSignature,
  formatRosterMonthShort(fromDate)
  );
@@ -576,13 +578,13 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  <div>
  <div className="flex items-center space-x-2 text-emerald-700 dark:text-emerald-400 text-xs font-black uppercase tracking-wider">
  <Layers className="w-4 h-4" />
- <span>Official Duty Roster Generator • 155 UASU BAF</span>
+ <span>Official Duty Roster Generator • {getActiveOfficeIdentity().officeName}</span>
  </div>
  <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white mt-1">
  Duty Roster Formats
  </h1>
  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
- Export and print standard BAF 155 UASU duty roster formats and Word documents.
+ Export and print standard {getActiveOfficeIdentity().officeName} duty roster formats and Word documents.
  </p>
  </div>
 
@@ -764,7 +766,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  BASE DUTY: AIRMEN
  </h2>
  <h3 className="text-sm font-bold text-slate-800 dark:text-slate-200 mt-0.5">
- (155 UASU, BAF)
+ ({getActiveOfficeIdentity().officeName})
  </h3>
  <p className="text-xs font-bold text-slate-700 dark:text-slate-300 mt-1">
  ({headerDateRange})
@@ -873,7 +875,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  <Logo155UASU className="h-14 w-14" />
  </div>
  <h2 className="text-base sm:text-lg font-bold uppercase tracking-wide underline text-slate-950 dark:text-white">
- IDAC DUTY ROSTER : 155 UASU BAF
+ IDAC DUTY ROSTER : {getActiveOfficeIdentity().officeName}
  </h2>
  <p className="text-xs font-bold text-slate-800 dark:text-slate-200 mt-1">
  {weekPreset === 'FULL_MONTH' ? formatMonthNameDisplay(fromDate) : `(${headerDateRange})`}
@@ -973,7 +975,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  <div className="text-xs uppercase font-black">{idacSignature.name}</div>
  <div className="text-[11px] font-normal">{idacSignature.rank}</div>
  <div className="text-[11px] font-normal">{idacSignature.designation}</div>
- <div className="text-[10px] uppercase font-bold">{idacSignature.unit || '155 UASU BAF'}</div>
+ <div className="text-[10px] uppercase font-bold">{idacSignature.unit || getActiveOfficeIdentity().officeName}</div>
  <div className="text-[11px] font-normal text-slate-900 dark:text-white print:text-black mt-0.5">
  {formatRosterMonthShort(fromDate)}
  </div>

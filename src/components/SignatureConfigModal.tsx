@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { PenTool, Check, X, Shield, FileCheck, RotateCcw } from 'lucide-react';
+import { getActiveOfficeIdentity, isDefault155UasuOffice } from '../firebase';
 
 export interface SignatureDetails {
   name: string;
@@ -28,21 +29,47 @@ export const DEFAULT_AUTHORIZED_BY: SignatureDetails = {
   digitalSignatureText: '',
 };
 
+function getOfficeDefaultPreparedBy(): SignatureDetails {
+  if (isDefault155UasuOffice()) return DEFAULT_PREPARED_BY;
+  return {
+    name: '',
+    rank: '',
+    designation: 'UWO',
+    unit: getActiveOfficeIdentity().officeName || '',
+    signDigitally: false,
+    digitalSignatureText: '',
+  };
+}
+
+function getOfficeDefaultAuthorizedBy(): SignatureDetails {
+  if (isDefault155UasuOffice()) return DEFAULT_AUTHORIZED_BY;
+  return {
+    name: '',
+    rank: '',
+    designation: 'Adjutant',
+    unit: getActiveOfficeIdentity().officeName || '',
+    signDigitally: false,
+    digitalSignatureText: '',
+  };
+}
+
 // Storage helper functions
 export function getSavedPreparedBy(): SignatureDetails {
+  const fallback = getOfficeDefaultPreparedBy();
   try {
     const saved = localStorage.getItem('baf_sign_prepared_by');
-    if (saved) return { ...DEFAULT_PREPARED_BY, ...JSON.parse(saved) };
+    if (saved) return { ...fallback, ...JSON.parse(saved) };
   } catch (e) {}
-  return DEFAULT_PREPARED_BY;
+  return fallback;
 }
 
 export function getSavedAuthorizedBy(): SignatureDetails {
+  const fallback = getOfficeDefaultAuthorizedBy();
   try {
     const saved = localStorage.getItem('baf_sign_authorized_by');
-    if (saved) return { ...DEFAULT_AUTHORIZED_BY, ...JSON.parse(saved) };
+    if (saved) return { ...fallback, ...JSON.parse(saved) };
   } catch (e) {}
-  return DEFAULT_AUTHORIZED_BY;
+  return fallback;
 }
 
 export function savePreparedBy(details: SignatureDetails): void {
@@ -90,16 +117,17 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
   if (!isOpen) return null;
 
   const handleSave = () => {
+    const activeUnit = getActiveOfficeIdentity().officeName || '155 UASU BAF';
     // Ensure Block Capital for Name
     const cleanPrepared = {
       ...prepared,
       name: prepared.name.toUpperCase().trim(),
-      unit: prepared.unit.trim() || '155 UASU BAF',
+      unit: prepared.unit.trim() || activeUnit,
     };
     const cleanAuthorized = {
       ...authorized,
       name: authorized.name.toUpperCase().trim(),
-      unit: authorized.unit.trim() || '155 UASU BAF',
+      unit: authorized.unit.trim() || activeUnit,
     };
 
     savePreparedBy(cleanPrepared);
@@ -228,13 +256,13 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
 
             <div className="space-y-1">
               <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                Unit <span className="text-[10px] text-slate-400">(Default: 155 UASU BAF)</span>
+                Unit <span className="text-[10px] text-slate-400">(Default: {getActiveOfficeIdentity().officeName})</span>
               </label>
               <input
                 type="text"
                 value={prepared.unit}
                 onChange={(e) => setPrepared({ ...prepared, unit: e.target.value })}
-                placeholder="155 UASU BAF"
+                placeholder={getActiveOfficeIdentity().officeName}
                 className="w-full px-3.5 py-2 text-xs font-medium rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-500"
               />
             </div>
@@ -314,13 +342,13 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
 
             <div className="space-y-1">
               <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                Unit <span className="text-[10px] text-slate-400">(Default: 155 UASU BAF)</span>
+                Unit <span className="text-[10px] text-slate-400">(Default: {getActiveOfficeIdentity().officeName})</span>
               </label>
               <input
                 type="text"
                 value={authorized.unit}
                 onChange={(e) => setAuthorized({ ...authorized, unit: e.target.value })}
-                placeholder="155 UASU BAF"
+                placeholder={getActiveOfficeIdentity().officeName}
                 className="w-full px-3.5 py-2 text-xs font-medium rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-500"
               />
             </div>
@@ -380,7 +408,7 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
                 </div>
                 <div className="text-[11px] font-bold">{prepared.rank || 'RANK'}</div>
                 <div className="text-[10px] font-normal">{prepared.designation || 'Designation'}</div>
-                <div className="text-[9px] text-slate-500">{prepared.unit || '155 UASU BAF'}</div>
+                <div className="text-[9px] text-slate-500">{prepared.unit || getActiveOfficeIdentity().officeName}</div>
               </div>
             </div>
 
@@ -404,7 +432,7 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
                 </div>
                 <div className="text-[11px] font-bold">{authorized.rank || 'RANK'}</div>
                 <div className="text-[10px] font-normal">{authorized.designation || 'Designation'}</div>
-                <div className="text-[9px] text-slate-500">{authorized.unit || '155 UASU BAF'}</div>
+                <div className="text-[9px] text-slate-500">{authorized.unit || getActiveOfficeIdentity().officeName}</div>
               </div>
             </div>
           </div>

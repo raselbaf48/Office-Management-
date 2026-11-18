@@ -172,9 +172,69 @@ export function safeSetItem(key: string, value: string): boolean {
   }
 }
 
+const GLOBAL_UNSCOPED_STORAGE_KEYS = new Set<string>([
+  'custom_office_config',
+  'baf_custom_office_firebase_config_v1',
+  'baf_master_registered_offices_cache',
+  'baf_theme_pref',
+  'theme',
+  'baf_force_apk_mode',
+  'baf_app_current_version_code',
+  'baf_app_current_version_name',
+  'baf_skipped_app_version',
+  'baf_latest_app_version',
+  'baf_client_session_id',
+  'baf_last_used_login_portal',
+  'baf_firebase_quota_exceeded_at',
+  'baf_firebase_quota_error_msg',
+  'baf_sync_logs',
+  'baf_firebase_sync_logs_v1',
+  'baf_local_cloud_sync_logs_v1',
+  'canteen_sync_logs',
+  'canteen_last_handled_sync_revision',
+]);
+
+function resolveOfficeScopedStorageKey(
+  rawGetItem: (key: string) => string | null,
+  key: string
+): string {
+  if (!key || typeof key !== 'string') return key;
+  if (key.includes('__office_')) return key;
+  if (GLOBAL_UNSCOPED_STORAGE_KEYS.has(key)) return key;
+  if (
+    key.startsWith('canteen_') ||
+    key.startsWith('baf_canteen_') ||
+    key.startsWith('baf_others_fund_') ||
+    key.startsWith('baf_deleted_others_fund_')
+  ) {
+    return key;
+  }
+  try {
+    const rawCustom = rawGetItem.call(window.localStorage, 'custom_office_config');
+    if (!rawCustom) return key;
+    const parsed = JSON.parse(rawCustom);
+    if (!parsed || typeof parsed !== 'object') return key;
+    const rawName = String(parsed.officeName || '').toUpperCase().trim();
+    let rawCode = String(parsed.officeCode || parsed.firebaseConfig?.officeCode || '').toUpperCase().trim();
+    if (!rawCode && rawName) {
+      const cleaned = rawName.replace(/[^A-Z0-9\s-]/g, '').trim();
+      const parts = cleaned.split(/[\s-]+/).filter(Boolean);
+      rawCode = parts.length === 1 ? parts[0].slice(0, 8) : parts.slice(0, 3).map((p: string) => p.slice(0, 4)).join('-').slice(0, 12);
+    }
+    if (!rawCode) return key;
+    if (rawCode === '155-UASU' || rawCode === '155UASU') {
+      return key;
+    }
+    const safeCode = rawCode.replace(/[^A-Z0-9_-]/g, '_');
+    return `${key}__office_${safeCode}`;
+  } catch {
+    return key;
+  }
+}
+
 /**
- * Global protection hook to patch Storage.prototype.setItem
- * Guarantees no uncaught QuotaExceededError ever crashes the UI
+ * Global protection hook to patch Storage.prototype.setItem / getItem / removeItem
+ * Guarantees no uncaught QuotaExceededError ever crashes the UI and isolates non-155 offices from 155 UASU keys
  */
 export function installSafeStorageProtection(): void {
   if (typeof window === 'undefined') return;
@@ -183,6 +243,24 @@ export function installSafeStorageProtection(): void {
   pruneNonEssentialStorage();
 
   const originalStorageSetItem = Storage.prototype.setItem;
+  const originalStorageGetItem = Storage.prototype.getItem;
+  const originalStorageRemoveItem = Storage.prototype.removeItem;
+
+  Storage.prototype.getItem = function (this: Storage, key: string): string | null {
+    const effectiveKey =
+      this === window.localStorage
+        ? resolveOfficeScopedStorageKey(originalStorageGetItem, key)
+        : key;
+    return originalStorageGetItem.call(this, effectiveKey);
+  };
+
+  Storage.prototype.removeItem = function (this: Storage, key: string): void {
+    const effectiveKey =
+      this === window.localStorage
+        ? resolveOfficeScopedStorageKey(originalStorageGetItem, key)
+        : key;
+    originalStorageRemoveItem.call(this, effectiveKey);
+  };
 
   Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
     // Special handling for baf_sync_logs: redirect localStorage writes to sessionStorage
@@ -196,11 +274,16 @@ export function installSafeStorageProtection(): void {
       return;
     }
 
+    const effectiveKey =
+      this === window.localStorage
+        ? resolveOfficeScopedStorageKey(originalStorageGetItem, key)
+        : key;
+
     // Automatically strip bulky data-URI images from menu-related keys
     const sanitizedValue = this === window.localStorage ? sanitizePayloadForStorage(key, value) : value;
 
     try {
-      originalStorageSetItem.call(this, key, sanitizedValue);
+      originalStorageSetItem.call(this, effectiveKey, sanitizedValue);
     } catch (err: any) {
       const isQuotaError =
         err?.name === 'QuotaExceededError' ||
@@ -210,16 +293,16 @@ export function installSafeStorageProtection(): void {
         (typeof err?.message === 'string' && err.message.toLowerCase().includes('quota'));
 
       if (isQuotaError && this === window.localStorage) {
-        if (shouldLogWarning(key)) {
-          console.warn(`[SafeStorage Global] Quota exceeded on setItem('${key}'). Auto-pruning...`);
+        if (shouldLogWarning(effectiveKey)) {
+          console.warn(`[SafeStorage Global] Quota exceeded on setItem('${effectiveKey}'). Auto-pruning...`);
         }
         pruneNonEssentialStorage();
         try {
-          originalStorageSetItem.call(this, key, sanitizedValue);
+          originalStorageSetItem.call(this, effectiveKey, sanitizedValue);
           return;
         } catch (retryErr) {
-          if (shouldLogWarning(key + '_suppressed')) {
-            console.warn(`[SafeStorage Global] Could not save '${key}' after pruning. Suppressed.`);
+          if (shouldLogWarning(effectiveKey + '_suppressed')) {
+            console.warn(`[SafeStorage Global] Could not save '${effectiveKey}' after pruning. Suppressed.`);
           }
           return;
         }

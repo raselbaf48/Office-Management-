@@ -3,6 +3,7 @@ import { Airman, FlightName, Rank } from '../types';
 import { X, Check, Building2, Home, MapPin, User, Phone, Shield, AlertCircle, Mail } from 'lucide-react';
 import { getRankSeniorityRange, resolveTargetSeniority, isJcoRank } from '../utils/seniority';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
+import { getActiveOfficeIdentity, isDefault155UasuOffice } from '../firebase';
 
 interface AddEditAirmanModalProps {
   variant?: 'nominal' | 'biodata';
@@ -20,7 +21,7 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
   onClose,
 }) => {
   const initialMatch = useMemo(() => {
-    if (!airmanToEdit) return undefined;
+    if (!airmanToEdit || !isDefault155UasuOffice()) return undefined;
     const cleanBd = (airmanToEdit.bdNo || '').replace(/^BD\/?/i, '').trim();
     return INITIAL_AIRMEN.find((a) => (a.bdNo || '').replace(/^BD\/?/i, '').trim() === cleanBd);
   }, [airmanToEdit]);
@@ -267,7 +268,7 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
               <h2 className="text-base font-bold text-white">
                 {airmanToEdit ? 'Edit Airman Details' : `Add New Airman to ${variant === 'biodata' ? 'Biodata Register' : 'Nominal Roll'}`}
               </h2>
-              <p className="text-xs text-emerald-300/80">155 UASU BAF • Personnel Registry</p>
+              <p className="text-xs text-emerald-300/80">{getActiveOfficeIdentity().officeName} • Personnel Registry</p>
             </div>
           </div>
           <button

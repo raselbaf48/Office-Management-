@@ -59,6 +59,8 @@ import { DisposalCategoryDropdown } from './DisposalCategoryDropdown';
 import { saveCustomDisposal, getSavedCustomDisposals, removeSavedCustomDisposal } from '../utils/customDisposalStore';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { getWeekdayShort } from '../utils/holidayUtils';
+import { getActiveOfficeIdentity } from '../firebase';
+import { localDb } from '../services/localDatabase';
 
 interface ParadeStateFormattedViewProps {
  role?: UserRole;
@@ -85,6 +87,22 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const todayStr = new Date().toISOString().split('T')[0];
  const isPtDocument = initialDocumentType === 'PT';
   const isOthersDocument = initialDocumentType === 'OTHERS';
+
+  const [officeIdentity, setOfficeIdentity] = useState(() => getActiveOfficeIdentity());
+  useEffect(() => {
+    const syncIdentity = () => setOfficeIdentity(getActiveOfficeIdentity());
+    window.addEventListener('baf_office_config_changed', syncIdentity);
+    window.addEventListener('baf_logo_updated', syncIdentity);
+    window.addEventListener('baf_settings_updated', syncIdentity);
+    window.addEventListener('storage', syncIdentity);
+    return () => {
+      window.removeEventListener('baf_office_config_changed', syncIdentity);
+      window.removeEventListener('baf_logo_updated', syncIdentity);
+      window.removeEventListener('baf_settings_updated', syncIdentity);
+      window.removeEventListener('storage', syncIdentity);
+    };
+  }, []);
+  const activeOfficeName = officeIdentity.officeName || '155 UASU BAF';
 
   const [othersStateName, setOthersStateName] = useState<string>(() => {
     if (typeof window !== 'undefined') {
@@ -128,11 +146,23 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  
 
- const [singleParadeData, setSingleParadeData] = useState<ParadeStateResponse | null>(null);
- const singleParadeDataRef = useRef<ParadeStateResponse | null>(null);
- const [multiDayStates, setMultiDayStates] = useState<Record<string, ParadeStateResponse>>({});
- const multiDayStatesRef = useRef<Record<string, ParadeStateResponse>>({});
- const [loading, setLoading] = useState<boolean>(false);
+  const initialStateType = isPtDocument ? 'PT' : isOthersDocument ? 'OTHERS' : 'PARADE';
+  const [singleParadeData, setSingleParadeData] = useState<ParadeStateResponse | null>(() => {
+    try {
+      return localDb.getParadeState({
+        date: selectedDate,
+        shift: 'Morning',
+        flight: 'Overall',
+        stateType: initialStateType,
+      });
+    } catch {
+      return null;
+    }
+  });
+  const singleParadeDataRef = useRef<ParadeStateResponse | null>(singleParadeData);
+  const [multiDayStates, setMultiDayStates] = useState<Record<string, ParadeStateResponse>>({});
+  const multiDayStatesRef = useRef<Record<string, ParadeStateResponse>>({});
+  const [loading, setLoading] = useState<boolean>(false);
 
  // Internal Print Modal state
  const [isInternalPrintOpen, setIsInternalPrintOpen] = useState<boolean>(false);
@@ -370,10 +400,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const isMultiDay = datesInRange.length > 1;
 
   // Single Day Fetch
-  const fetchSingle = async (showLoader = false) => {
-    if (showLoader && !singleParadeDataRef.current) {
-      setLoading(true);
-    }
+  const fetchSingle = async (_showLoader = false) => {
     try {
       const stateType = isPtDocument ? 'PT' : isOthersDocument ? 'OTHERS' : 'PARADE';
       const res = await fetch(`/api/parade-state?date=${fromDate}&shift=Morning&flight=Overall&stateType=${stateType}`);
@@ -390,10 +417,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
   };
 
   // Multi Day Fetch
-  const fetchMulti = async (showLoader = false) => {
-    if (showLoader && Object.keys(multiDayStatesRef.current).length === 0) {
-      setLoading(true);
-    }
+  const fetchMulti = async (_showLoader = false) => {
     try {
       const stateType = isPtDocument ? 'PT' : isOthersDocument ? 'OTHERS' : 'PARADE';
       const results = await Promise.all(
@@ -856,8 +880,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  const unitHeader =
  selectedFlight === 'Overall'
- ? '155 UASU BAF'
- : `155 UASU BAF (${selectedFlight.toUpperCase()} FLT)`;
+ ? activeOfficeName
+ : `${activeOfficeName} (${selectedFlight.toUpperCase()} FLT)`;
  const dateRangeHeader = `${formatDateShort(fromDate)} to ${formatDateShort(toDate)}`;
  const p = getSavedPreparedBy();
  const a = getSavedAuthorizedBy();
@@ -865,7 +889,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  unitHeader,
  dateRangeHeader,
  rows,
- `${documentTitle} - ${selectedFlight === 'Overall' ? '155 UASU' : selectedFlight + ' Flt'} (${fromDate === toDate ? formatDateShort(fromDate).replace(/ \d{2}$/, '') : formatDateShort(fromDate).replace(/ \d{2}$/, '') + '-' + formatDateShort(toDate).replace(/ \d{2}$/, '')}).docx`,
+ `${documentTitle} - ${selectedFlight === 'Overall' ? activeOfficeName : selectedFlight + ' Flt'} (${fromDate === toDate ? formatDateShort(fromDate).replace(/ \d{2}$/, '') : formatDateShort(fromDate).replace(/ \d{2}$/, '') + '-' + formatDateShort(toDate).replace(/ \d{2}$/, '')}).docx`,
  { name: p.name, rank: p.rank, desig: p.designation },
  { name: a.name, rank: a.rank, desig: a.designation },
  documentHeader
@@ -899,7 +923,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  otherDisposals,
  leftSig: { name: p.name, rank: p.rank, desig: p.designation },
  rightSig: { name: a.name, rank: a.rank, desig: a.designation },
-    }, `${documentTitle} - ${selectedFlight === 'Overall' ? '155 UASU' : selectedFlight + ' Flt'} (${fromDate === toDate ? formatDateShort(fromDate).replace(/ \d{2}$/, '') : formatDateShort(fromDate).replace(/ \d{2}$/, '') + '-' + formatDateShort(toDate).replace(/ \d{2}$/, '')}).docx`);
+    }, `${documentTitle} - ${selectedFlight === 'Overall' ? activeOfficeName : selectedFlight + ' Flt'} (${fromDate === toDate ? formatDateShort(fromDate).replace(/ \d{2}$/, '') : formatDateShort(fromDate).replace(/ \d{2}$/, '') + '-' + formatDateShort(toDate).replace(/ \d{2}$/, '')}).docx`);
  }
  };
 
@@ -1276,7 +1300,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <div>
           <div className="flex items-center space-x-2 text-emerald-700 dark:text-emerald-400 text-xs font-black uppercase tracking-wider">
             <Shield className="w-4 h-4" />
-            <span>155 UASU BAF • Daily {documentTitle}</span>
+            <span>{activeOfficeName} • Daily {documentTitle}</span>
           </div>
           <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white print:text-black mt-1">
             {documentTitle} Controls
@@ -1473,7 +1497,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  </h1>
  <br />
  <h2 className="font-bold tracking-wide text-slate-900 dark:text-white print:text-black mt-0.5 underline inline-block text-sm uppercase">
- 155 UASU BAF {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLIGHT)` : ''}
+ {activeOfficeName} {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLIGHT)` : ''}
  </h2>
  </div>
  <div className="text-right font-normal text-slate-900 dark:text-white print:text-black pr-1 text-xs mt-1">
@@ -1713,7 +1737,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  </h1>
  <br />
  <h2 className="font-bold tracking-wide text-slate-900 dark:text-white print:text-black mt-0.5 underline inline-block text-sm uppercase">
- 155 UASU BAF {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLT)` : ''}
+ {activeOfficeName} {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLT)` : ''}
  </h2>
  </div>
  <div className="text-right font-normal pr-1 text-xs mt-1 text-slate-900 dark:text-white print:text-black">
@@ -1793,8 +1817,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const stats = getFlightStats(selectedFlight);
  const unitLabel =
  selectedFlight === 'Overall'
- ? '155 UASU BAF'
- : `155 UASU BAF (${selectedFlight.toUpperCase()} FLT)`;
+ ? activeOfficeName
+ : `${activeOfficeName} (${selectedFlight.toUpperCase()} FLT)`;
 
  return (
  <tr className="font-bold text-slate-900 dark:text-white print:text-black border-b-2 border-slate-900 dark:border-white print:border-black print:">
@@ -2021,7 +2045,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <div className="text-xs uppercase font-black">{preparedBy.name}</div>
  <div className="text-[11px] font-normal">{preparedBy.rank}</div>
  <div className="text-[11px] font-normal">{preparedBy.designation}</div>
- <div className="text-[10px] uppercase font-bold">{preparedBy.unit || '155 UASU BAF'}</div>
+ <div className="text-[10px] uppercase font-bold">{preparedBy.unit || activeOfficeName}</div>
  </div>
  </div>
 
@@ -2041,7 +2065,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <div className="text-xs uppercase font-black">{authorizedBy.name}</div>
  <div className="text-[11px] font-normal">{authorizedBy.rank}</div>
  <div className="text-[11px] font-normal">{authorizedBy.designation}</div>
- <div className="text-[10px] uppercase font-bold">{authorizedBy.unit || '155 UASU BAF'}</div>
+ <div className="text-[10px] uppercase font-bold">{authorizedBy.unit || activeOfficeName}</div>
                   </div>
                 </div>
               </div>

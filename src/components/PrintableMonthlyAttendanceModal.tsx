@@ -13,6 +13,7 @@ import {
   getAirmanLeftDateISO,
   isAirmanInUnitForMonth,
 } from '../utils/csvExport';
+import { getActiveOfficeIdentity } from '../firebase';
 
 interface PrintableMonthlyAttendanceModalProps {
   isOpen: boolean;
@@ -261,7 +262,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
           </div>
           <div>
             <h2 className="text-sm sm:text-base font-black text-white">
-              155 UASU, BAF • Attendance Register Preview
+              {getActiveOfficeIdentity().officeName} • Attendance Register Preview
             </h2>
             <p className="text-xs text-slate-300 font-medium">
               {monthName} • {filteredAirmen.length} Airmen displayed
@@ -371,7 +372,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
             Month underneath */}
         <div className="text-center pb-2 mb-3 border-b-2 border-slate-900">
           <h1 className="text-xl sm:text-2xl font-black uppercase tracking-wider text-slate-900 print:text-base">
-            155 UASU, BAF
+            {getActiveOfficeIdentity().officeName}
           </h1>
           <h2 className="text-base sm:text-lg font-black uppercase underline underline-offset-4 tracking-wide text-slate-900 mt-0.5 print:text-xs">
             ATTENDANCE REGISTER

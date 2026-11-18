@@ -9,6 +9,7 @@ import { calculateBalancedAutoTargets, calculateExactDutyRatios, roundDutyByRule
 import { pushDutyListToCloud, pullDutyListFromCloud, DutySyncResult } from '../utils/dutyCloudSync';
 import { getAirmanJoinDateISO, getAirmanLeftDateISO, normalizeDateToISO, formatShortDate } from '../utils/csvExport';
 import { sortAirmenBySeniority } from '../utils/seniority';
+import { getActiveOfficeIdentity } from '../firebase';
 
 const STANDARD_DISPOSALS = [
   '-',
@@ -644,7 +645,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
       {/* Main Headers */}
       <div className="text-center mb-6">
         <div className="font-bold underline text-lg">All Duties</div>
-        <div className="font-bold underline text-lg">155 UASU BAF</div>
+        <div className="font-bold underline text-lg">{getActiveOfficeIdentity().officeName}</div>
       </div>
 
       {/* Conditionally rendered Top Tables Flex */}

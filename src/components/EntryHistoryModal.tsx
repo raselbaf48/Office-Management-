@@ -31,7 +31,7 @@ export const EntryHistoryModal: React.FC<EntryHistoryModalProps> = ({
   filterType = 'ALL'
 }) => {
   const [historyList, setHistoryList] = useState<ActivityHistoryItem[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string>('');
@@ -54,7 +54,6 @@ export const EntryHistoryModal: React.FC<EntryHistoryModalProps> = ({
   const todayStr = new Date().toISOString().split('T')[0];
 
   const fetchHistory = async () => {
-    setLoading(true);
     try {
       const res = await fetch('/api/roster/history');
       if (res.ok) {

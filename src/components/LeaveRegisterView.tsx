@@ -8,6 +8,7 @@ import { getOptimalMinColumnWidth } from '../utils/tableUtils';
 import { EntryHistoryModal } from './EntryHistoryModal';
 import { getAirmanDisposalForRange } from '../utils/airmanDisposalHelper';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
+import { getActiveOfficeIdentity } from '../firebase';
 interface LeaveRegisterViewProps {
   role?: UserRole;
   airmen: Airman[];
@@ -132,7 +133,7 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
   const [selectedYear, setSelectedYear] = useState<string>(() => String(new Date().getFullYear()));
   const [summaryFilter, setSummaryFilter] = useState<'Casual' | 'Annual' | 'Recreation' | 'Total' | 'OnLeave' | null>(null);
   const [leaveData, setLeaveData] = useState<Record<string, LeaveRecord>>({});
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(false);
   const [showHistoryModal, setShowHistoryModal] = useState<boolean>(false);
 
   // Grant / Record Leave Modal
@@ -282,7 +283,6 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
 
   // Fetch all assignments for the year to calculate Casual, Annual, and Recreation leave (with F-295 prefix/suffix rule)
   const fetchLeaves = async () => {
-    setLoading(true);
     try {
       // Fetch all 12 months of the year
       const months = Array.from({ length: 12 }, (_, i) => {
@@ -560,7 +560,7 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
         <div>
           <div className="flex items-center space-x-2 text-emerald-700 dark:text-emerald-400 text-xs font-black uppercase tracking-wider">
             <Calendar className="w-4 h-4" />
-            <span>Workforce Management • 155 UASU BAF</span>
+            <span>Workforce Management • {getActiveOfficeIdentity().officeName}</span>
           </div>
           <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white mt-1">
             Leave Register

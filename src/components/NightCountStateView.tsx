@@ -62,6 +62,7 @@ import { saveCustomDisposal, getSavedCustomDisposals, removeSavedCustomDisposal 
 
 import { exportHtmlToWord } from '../utils/htmlExport';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
+import { getActiveOfficeIdentity } from '../firebase';
 
 interface NightCountStateViewProps {
   role?: UserRole;
@@ -107,6 +108,22 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
   const [signatureInitialTab, setSignatureInitialTab] = useState<'PREPARED_BY' | 'AUTHORIZED_BY'>('PREPARED_BY');
   const [preparedBy, setPreparedBy] = useState<SignatureDetails>(getSavedPreparedBy);
   const [authorizedBy, setAuthorizedBy] = useState<SignatureDetails>(getSavedAuthorizedBy);
+
+  const [officeIdentity, setOfficeIdentity] = useState(() => getActiveOfficeIdentity());
+  useEffect(() => {
+    const syncIdentity = () => setOfficeIdentity(getActiveOfficeIdentity());
+    window.addEventListener('baf_office_config_changed', syncIdentity);
+    window.addEventListener('baf_logo_updated', syncIdentity);
+    window.addEventListener('baf_settings_updated', syncIdentity);
+    window.addEventListener('storage', syncIdentity);
+    return () => {
+      window.removeEventListener('baf_office_config_changed', syncIdentity);
+      window.removeEventListener('baf_logo_updated', syncIdentity);
+      window.removeEventListener('baf_settings_updated', syncIdentity);
+      window.removeEventListener('storage', syncIdentity);
+    };
+  }, []);
+  const activeOfficeName = officeIdentity.officeName || '155 UASU BAF';
 
   // Single Airman Row Quick Edit Popover
   const [activeTab, setActiveTab] = useState<'155 UASU BAF' | 'Flying Wing'>('155 UASU BAF');
@@ -308,7 +325,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
   // Format Date: e.g. "14 Aug 26"
   const getPdfTitle = () => {
     const formattedDate = formatDateShort(selectedDate);
-    return `Night Count State - 155 UASU BAF (${formattedDate})`;
+    return `Night Count State - ${activeOfficeName} (${formattedDate})`;
   };
 
   useEffect(() => {
@@ -1146,7 +1163,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
         <div>
           <div className="flex items-center space-x-2 text-emerald-700 dark:text-emerald-400 text-xs font-black uppercase tracking-wider">
             <Shield className="w-4 h-4" />
-            <span>155 UASU BAF • Daily Night Count State</span>
+            <span>{activeOfficeName} • Daily Night Count State</span>
           </div>
           <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white print:text-black mt-1">
             Night Count State Controls
@@ -1180,7 +1197,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
               if (activeTab === 'Flying Wing') {
                 setShowFlgWgHistory(true);
               } else {
-                alert('155 UASU BAF history is loaded by selecting previous dates or using the Multi-Day Export from the Overview tab.');
+                alert(`${activeOfficeName} history is loaded by selecting previous dates or using the Multi-Day Export from the Overview tab.`);
               }
             }}
             className="flex items-center space-x-1.5 px-3.5 py-2 bg-slate-200 dark:bg-slate-800 print:bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl font-bold text-xs shadow-xs transition-all cursor-pointer"
@@ -1248,7 +1265,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
           onClick={() => setActiveTab('155 UASU BAF')}
           className={`px-4 py-2 rounded-lg font-bold text-sm transition-colors ${activeTab === '155 UASU BAF' ? 'bg-emerald-600 text-white shadow-md' : 'bg-slate-200 dark:bg-slate-800 print:bg-slate-200 text-slate-700 hover:bg-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700'}`}
         >
-          155 UASU BAF
+          {activeOfficeName}
         </button>
         <button
           onClick={() => setActiveTab('Flying Wing')}
@@ -1300,7 +1317,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
                 </h1>
                 <br />
                 <h2 className="font-bold tracking-wide text-black dark:text-white print:text-black mt-0.5 underline inline-block text-sm uppercase">
-                  {activeTab} {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLIGHT)` : ''}
+                  {activeOfficeName} {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLIGHT)` : ''}
                 </h2>
               </div>
               <div className="text-right font-normal text-black dark:text-white print:text-black pr-1 text-xs mt-1">
@@ -1381,7 +1398,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
 
                   return (
                     <tr className="bg-white dark:bg-slate-900 print:bg-white">
-                      <td className="border-r border-black dark:border-slate-500 print:border-black p-2 font-bold whitespace-nowrap min-w-[120px] text-center align-middle">{activeTab}</td>
+                      <td className="border-r border-black dark:border-slate-500 print:border-black p-2 font-bold whitespace-nowrap min-w-[120px] text-center align-middle">{activeOfficeName}</td>
                       <td className="border-r border-black dark:border-slate-500 print:border-black p-1 align-middle text-center">{stats.totalStr || '-'}</td>
                       <td className="border-r border-black dark:border-slate-500 print:border-black p-1 align-middle text-center">{stats.detTdyCount || '-'}</td>
                       <td className="border-r border-black dark:border-slate-500 print:border-black p-1 align-middle text-center">{stats.effStr || '-'}</td>
@@ -1428,7 +1445,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
                   <div className="text-xs uppercase font-black">{preparedBy.name}</div>
                   <div className="text-[11px] font-normal">{preparedBy.rank}</div>
                   <div className="text-[11px] font-normal">{preparedBy.designation}</div>
-                  <div className="text-[10px] uppercase font-bold">{preparedBy.unit || '155 UASU BAF'}</div>
+                  <div className="text-[10px] uppercase font-bold">{preparedBy.unit || activeOfficeName}</div>
                 </div>
               </div>
 
@@ -1438,7 +1455,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
                   <div className="text-xs uppercase font-black">{authorizedBy.name}</div>
                   <div className="text-[11px] font-normal">{authorizedBy.rank}</div>
                   <div className="text-[11px] font-normal">{authorizedBy.designation}</div>
-                  <div className="text-[10px] uppercase font-bold">{authorizedBy.unit || '155 UASU BAF'}</div>
+                  <div className="text-[10px] uppercase font-bold">{authorizedBy.unit || activeOfficeName}</div>
                 </div>
               </div>
             </div>
@@ -1457,7 +1474,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
                 </h1>
                 <br />
                 <h2 className="font-bold tracking-wide text-black dark:text-white print:text-black mt-0.5 underline inline-block text-sm uppercase">
-                  155 UASU BAF {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLT)` : ''}
+                  {activeOfficeName} {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLT)` : ''}
                 </h2>
               </div>
               <div className="text-right font-normal text-black dark:text-white print:text-black pr-1 text-xs mt-1">
@@ -1539,7 +1556,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
 
                   return (
                     <tr className="bg-white dark:bg-slate-900 print:bg-white">
-                      <td className="border-r border-black dark:border-slate-500 print:border-black p-2 font-bold whitespace-nowrap min-w-[120px] text-center align-middle">{activeTab}</td>
+                      <td className="border-r border-black dark:border-slate-500 print:border-black p-2 font-bold whitespace-nowrap min-w-[120px] text-center align-middle">{activeOfficeName}</td>
                       <td className="border-r border-black dark:border-slate-500 print:border-black p-1 align-middle text-center">{stats.totalStr || '-'}</td>
                       <td className="border-r border-black dark:border-slate-500 print:border-black p-1 align-middle text-center">{stats.detTdyCount || '-'}</td>
                       <td className="border-r border-black dark:border-slate-500 print:border-black p-1 align-middle text-center">{stats.effStr || '-'}</td>
@@ -1790,7 +1807,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
                   <div className="text-xs uppercase font-black">{preparedBy.name}</div>
                   <div className="text-[11px] font-normal">{preparedBy.rank}</div>
                   <div className="text-[11px] font-normal">{preparedBy.designation}</div>
-                  <div className="text-[10px] uppercase font-bold">{preparedBy.unit || '155 UASU BAF'}</div>
+                  <div className="text-[10px] uppercase font-bold">{preparedBy.unit || activeOfficeName}</div>
                 </div>
               </div>
 
@@ -1810,7 +1827,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
                   <div className="text-xs uppercase font-black">{authorizedBy.name}</div>
                   <div className="text-[11px] font-normal">{authorizedBy.rank}</div>
                   <div className="text-[11px] font-normal">{authorizedBy.designation}</div>
-                  <div className="text-[10px] uppercase font-bold">{authorizedBy.unit || '155 UASU BAF'}</div>
+                  <div className="text-[10px] uppercase font-bold">{authorizedBy.unit || activeOfficeName}</div>
                 </div>
               </div>
             </div>

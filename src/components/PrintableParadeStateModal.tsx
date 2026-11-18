@@ -13,6 +13,7 @@ import {
 import { DUTY_TYPES, DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { exportHtmlToWord } from '../utils/htmlExport';
 import { formatDutyOnShortName, formatDutyOffShortName } from '../utils/dutyFormatter';
+import { getActiveOfficeIdentity } from '../firebase';
 import {
  Calendar,
  Printer,
@@ -233,7 +234,8 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
   const getPdfTitle = () => {
     const formattedDate = formatDateShort(fromDate).replace(/ \d{2}$/, '');
     const toFormattedDate = formatDateShort(toDate).replace(/ \d{2}$/, '');
-    const flightText = selectedFlight === 'Overall' ? '155 UASU' : `${selectedFlight} Flt`;
+    const activeOfficeName = getActiveOfficeIdentity().officeName || '155 UASU BAF';
+    const flightText = selectedFlight === 'Overall' ? activeOfficeName : `${selectedFlight} Flt`;
     const docName = customDocumentHeader
       ? customDocumentHeader.replace(/ STATE$/i, ' State')
       : isOthersDocument
@@ -1076,7 +1078,8 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  const singleWeekday = getWeekdayShort(fromDate);
 
  const buildCopyTextForDay = (dStr: string, dayData: ParadeStateResponse | null): string => {
-   const flightLine = selectedFlight === 'Overall' ? '155 UASU BAF' : `${selectedFlight} Flt`;
+   const activeOfficeName = getActiveOfficeIdentity().officeName || '155 UASU BAF';
+   const flightLine = selectedFlight === 'Overall' ? activeOfficeName : `${selectedFlight} Flt`;
    const stateLabel = isPtDocument ? '*PT State*' : isOthersDocument ? `*${customDocumentHeader || 'Others State'}*` : '*Parade State*';
    const onLabel = isPtDocument ? '*On PT*' : '*On Parade*';
 
@@ -1232,7 +1235,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
             <X className="w-5 h-5" />
           </button>
           <div>
-            <h2 className="text-base sm:text-lg font-black text-white">Print Preview: 155 UASU BAF</h2>
+            <h2 className="text-base sm:text-lg font-black text-white">Print Preview: {getActiveOfficeIdentity().officeName}</h2>
             <p className="text-xs font-medium text-slate-400">Review document before printing</p>
           </div>
         </div>
@@ -1431,7 +1434,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  </h1>
  <br />
  <h2 className="font-bold tracking-wide text-slate-900 dark:text-white mt-0.5 underline inline-block text-sm uppercase">
- 155 UASU BAF {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLIGHT)` : ''}
+ {getActiveOfficeIdentity().officeName} {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLIGHT)` : ''}
  </h2>
  </div>
  <div className="text-right font-normal text-slate-900 dark:text-white pr-1 text-xs mt-1">
@@ -1671,7 +1674,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  </h1>
  <br />
  <h2 className="font-bold tracking-wide text-slate-900 dark:text-white mt-0.5 underline inline-block text-sm uppercase">
- 155 UASU BAF {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLT)` : ''}
+ {getActiveOfficeIdentity().officeName} {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLT)` : ''}
  </h2>
  </div>
  <div className="text-right font-normal pr-1 text-xs mt-1 text-slate-900 dark:text-white">
@@ -1749,10 +1752,11 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  <tbody>
  {(() => {
  const stats = getFlightStats(selectedFlight);
+ const activeOfficeName = getActiveOfficeIdentity().officeName || '155 UASU BAF';
  const unitLabel =
  selectedFlight === 'Overall'
- ? '155 UASU BAF'
- : `155 UASU BAF (${selectedFlight.toUpperCase()} FLT)`;
+ ? activeOfficeName
+ : `${activeOfficeName} (${selectedFlight.toUpperCase()} FLT)`;
 
  return (
  <tr className="font-bold text-slate-900 dark:text-white border-b-2 border-slate-900 dark:border-slate-600">
@@ -1979,7 +1983,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  <div className="text-xs uppercase font-black">{preparedBy.name}</div>
  <div className="text-[11px] font-normal">{preparedBy.rank}</div>
  <div className="text-[11px] font-normal">{preparedBy.designation}</div>
- <div className="text-[10px] uppercase font-bold">{preparedBy.unit || '155 UASU BAF'}</div>
+ <div className="text-[10px] uppercase font-bold">{preparedBy.unit || getActiveOfficeIdentity().officeName}</div>
  </div>
  </div>
 
@@ -1999,7 +2003,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  <div className="text-xs uppercase font-black">{authorizedBy.name}</div>
  <div className="text-[11px] font-normal">{authorizedBy.rank}</div>
  <div className="text-[11px] font-normal">{authorizedBy.designation}</div>
- <div className="text-[10px] uppercase font-bold">{authorizedBy.unit || '155 UASU BAF'}</div>
+ <div className="text-[10px] uppercase font-bold">{authorizedBy.unit || getActiveOfficeIdentity().officeName}</div>
                   </div>
                 </div>
               </div>

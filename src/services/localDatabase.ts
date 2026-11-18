@@ -15,7 +15,7 @@ import { INITIAL_AIRMEN } from '../data/initialAirmen';
 import { DUTY_TYPES } from '../data/dutyTypes';
 import { generateOfficialMonthAssignments, getOfficialParadeStateDocument } from '../data/officialJulyAugustData';
 import { calculateDutyStats, detectConflicts, getDaysInMonth } from '../data/rosterGenerator';
-import { DutyRatioTable, INITIAL_OFFICIAL_DUTY_MATRIX, getStoredDutyMatrix, saveDutyMatrix } from '../data/officialDutyRatioMatrix';
+import { DutyRatioTable, INITIAL_OFFICIAL_DUTY_MATRIX, getInitialDutyMatrixForActiveOffice, getStoredDutyMatrix, saveDutyMatrix, resetDutyMatrixToDefault } from '../data/officialDutyRatioMatrix';
 import { findBestAirmanMatch as matchAirmanRankFirst, parseRosterTextHeuristically } from '../utils/airmanMatcher';
 import { sortAirmenBySeniority, normalizeAirmenSeniority, reorderAirmanSeniority } from '../utils/seniority';
 import {
@@ -46,6 +46,7 @@ import {
   subscribeToSyncManifest,
   fetchSyncManifestFromFirebase,
   probeFirebaseConnectionAndQuota,
+  purgeActiveCustomOfficeCloudData,
   getAssignmentDocId,
   getAirmanDocId,
   getPendingDeltaQueue,
@@ -336,10 +337,14 @@ const IGNORED_SETTING_KEYS = new Set<string>([
   'baf_gmail_user',
   'baf_drive_user_photo',
   'baf_daily_req_input_mode',
+  'custom_office_config',
+  'baf_custom_office_firebase_config_v1',
+  'baf_master_registered_offices_cache',
+  'baf_custom_office_clean_v3',
 ]);
 
 function isSyncableSettingKey(key: string): boolean {
-  if (!key || IGNORED_SETTING_KEYS.has(key) || key.endsWith('_db')) return false;
+  if (!key || key.includes('__office_') || IGNORED_SETTING_KEYS.has(key) || key.endsWith('_db')) return false;
   return SETTING_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
@@ -377,6 +382,8 @@ export class LocalDatabaseEngine {
     this.isInitialPullDone = false;
     this.activeSyncPromise = null;
     this.isFirebaseSyncing = false;
+    lastSyncedSettingsMap.clear();
+    lastSyncedMatrixRaw = '';
     if (this.saveTimeout) {
       clearTimeout(this.saveTimeout);
       this.saveTimeout = null;
@@ -409,6 +416,7 @@ export class LocalDatabaseEngine {
         try {
           this.lastPullAt = window.localStorage.getItem(getActiveLastPullKey()) || '';
           this.lastHandledRevision = Number(window.localStorage.getItem(getActiveLastRevisionKey()) || '0') || 0;
+          this.seedBaselineSettingsMap();
         } catch {}
       }
     }
@@ -461,8 +469,9 @@ export class LocalDatabaseEngine {
         }
       }, 1000);
 
-      window.addEventListener('baf_office_config_changed', () => {
-        this.switchActiveOfficeWorkspace(false);
+      window.addEventListener('baf_office_config_changed', (e: any) => {
+        const isBrandNew = Boolean(e?.detail?.__isBrandNew);
+        this.switchActiveOfficeWorkspace(isBrandNew);
       });
 
       window.addEventListener("baf_idac_settings_updated", (e: any) => { if (e.detail?.source !== 'firebase') this.saveToFirebase(this.db, false); });
@@ -609,12 +618,29 @@ export class LocalDatabaseEngine {
   private getSyncableSettingsSnapshot(): Record<string, string> {
     const out: Record<string, string> = {};
     if (typeof window === 'undefined') return out;
+    const isDefault155 = isDefault155UasuOffice();
+    const officeSuffix = !isDefault155
+      ? getOfficeScopedStorageKey('__probe__').replace(/^__probe__/, '')
+      : '';
+
     for (let i = 0; i < window.localStorage.length; i++) {
-      const k = window.localStorage.key(i);
-      if (!k || !isSyncableSettingKey(k)) continue;
-      const v = window.localStorage.getItem(k);
-      if (v !== null && v.length < 880000) {
-        out[k] = v;
+      const rawKey = window.localStorage.key(i);
+      if (!rawKey) continue;
+      if (isDefault155) {
+        if (rawKey.includes('__office_')) continue;
+        if (!isSyncableSettingKey(rawKey)) continue;
+        const v = window.localStorage.getItem(rawKey);
+        if (v !== null && v.length < 880000) {
+          out[rawKey] = v;
+        }
+      } else {
+        if (!officeSuffix || !rawKey.endsWith(officeSuffix)) continue;
+        const baseKey = rawKey.slice(0, -officeSuffix.length);
+        if (!isSyncableSettingKey(baseKey)) continue;
+        const v = window.localStorage.getItem(baseKey);
+        if (v !== null && v.length < 880000) {
+          out[baseKey] = v;
+        }
       }
     }
     return out;
@@ -1281,19 +1307,54 @@ export class LocalDatabaseEngine {
       );
 
       // 4. Reconcile User Profiles
+      const isDefaultOffice = isDefault155UasuOffice();
+      const validCustomAirmenBdSet = new Set<string>(
+        (newDb.airmen || [])
+          .map((a: any) => String(a?.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase())
+          .filter(Boolean)
+      );
+      const isLeaked155AutoSyncedUser = (u: any): boolean => {
+        if (isDefaultOffice || !u) return false;
+        const cleanBd = String(u?.bdNo || u?.userId || '').replace(/^BD\/?/i, '').trim().toLowerCase();
+        const digits = cleanBd.replace(/\D/g, '');
+        if (digits === '48456' || u.role === 'master_owner' || u.isProtected === true) return false;
+        if (String(u.id || '').startsWith('office-admin-')) return false;
+        const isAutoSynced =
+          u.remarks === 'Auto-synced from Nominal Roll' ||
+          u.detailedBy === 'System Auto Sync';
+        return isAutoSynced && !validCustomAirmenBdSet.has(cleanBd);
+      };
+
+      // One-time cleanup if this custom office was created before isolation fix and had 155 UASU settings/users leaked into cloud
+      const needsCustomOfficeSanitize =
+        !isDefaultOffice &&
+        (newDb.airmen || []).length === 0 &&
+        window.localStorage.getItem('baf_custom_office_clean_v3') !== 'true';
+
+      if (needsCustomOfficeSanitize) {
+        fbSettingsMeta = {};
+        fbUsers = fbUsers.filter((u: any) => !isLeaked155AutoSyncedUser(u));
+        resetDutyMatrixToDefault();
+        window.localStorage.setItem('baf_custom_office_clean_v3', 'true');
+        await purgeActiveCustomOfficeCloudData({ onlySettingsAndLeakedUsers: true }).catch(() => {});
+      }
+
       const userMap = new Map<string, any>();
       const getUserBdKey = (u: any) => String(u?.bdNo || u?.id || '').replace(/^BD\/?/i, '').trim().toLowerCase();
       if (useSinceIso) {
         (this.db.detailedUsers || []).forEach((u: any) => {
+          if (isLeaked155AutoSyncedUser(u)) return;
           const k = getUserBdKey(u);
           if (k) userMap.set(k, u);
         });
       }
       fbUsers.forEach((u: any) => {
+        if (isLeaked155AutoSyncedUser(u)) return;
         const k = getUserBdKey(u);
         if (k) userMap.set(k, u);
       });
       (this.db.detailedUsers || []).forEach((localU: any) => {
+        if (isLeaked155AutoSyncedUser(localU)) return;
         const k = getUserBdKey(localU);
         const docId = sanitizeDocId(localU?.id || `user_login_${localU?.bdNo || 'u'}`);
         const pendingTime = pendingQueue.users[docId];
@@ -2201,19 +2262,45 @@ export class LocalDatabaseEngine {
               migratedAssignments[m] = cleanList;
             });
 
+            const validCustomBdSet = new Set<string>(
+              dedupedAirmen
+                .map((a: any) => String(a?.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase())
+                .filter(Boolean)
+            );
+            const sanitizedDetailedUsers = Array.isArray(parsed.detailedUsers)
+              ? parsed.detailedUsers.filter((u: any) => {
+                  if (isDefault155 || !u) return true;
+                  const cleanBd = String(u?.bdNo || u?.userId || '').replace(/^BD\/?/i, '').trim().toLowerCase();
+                  const digits = cleanBd.replace(/\D/g, '');
+                  if (digits === '48456' || u.role === 'master_owner' || u.isProtected === true) return true;
+                  if (String(u.id || '').startsWith('office-admin-')) return true;
+                  const isAutoSynced =
+                    u.remarks === 'Auto-synced from Nominal Roll' ||
+                    u.detailedBy === 'System Auto Sync';
+                  if (isAutoSynced && !validCustomBdSet.has(cleanBd)) {
+                    return false;
+                  }
+                  return true;
+                })
+              : [];
+
             const db: LocalStorageDB = {
               airmen: normalizeAirmenSeniority(dedupedAirmen),
               assignments: migratedAssignments,
 
               activityHistory: Array.isArray(parsed.activityHistory) ? parsed.activityHistory : [],
               adminPasscode: parsed.adminPasscode || DEFAULT_ADMIN_PASSCODE,
-              detailedUsers: parsed.detailedUsers || [],
+              detailedUsers: sanitizedDetailedUsers,
               importHistory: parsed.importHistory || [],
               lastUpdated: parsed.lastUpdated || new Date().toISOString(),
             };
 
             // If duplicates or corrupted entries were purged from localStorage, immediately save the clean DB
-            if (dedupedAirmen.length !== parsed.airmen.length || hadCorruptedAssignments) {
+            if (
+              dedupedAirmen.length !== parsed.airmen.length ||
+              sanitizedDetailedUsers.length !== (parsed.detailedUsers || []).length ||
+              hadCorruptedAssignments
+            ) {
               try {
                 if (typeof window !== 'undefined' && window.localStorage) {
                   window.localStorage.setItem(storageKey, JSON.stringify(db));
@@ -2973,7 +3060,7 @@ export class LocalDatabaseEngine {
     try {
       currentMatrix = getStoredDutyMatrix(date);
     } catch {
-      currentMatrix = [...INITIAL_OFFICIAL_DUTY_MATRIX];
+      currentMatrix = [...getInitialDutyMatrixForActiveOffice()];
     }
 
     const getDutyRule = (assignment: DutyAssignment | undefined): {

@@ -7,6 +7,7 @@ import { addCustomDuty, CustomDutyConfig, removeCustomDuty, getCustomDuties, sav
 import { getSavedCustomDisposals, saveCustomDisposal, removeSavedCustomDisposal } from '../utils/customDisposalStore';
 import { calculateExactDutyRatios, roundDutyByRule, isFixedEqualDuty } from '../utils/dutyDistribution';
 import { sortAirmenBySeniority } from '../utils/seniority';
+import { getActiveOfficeIdentity } from '../firebase';
 
 const STANDARD_DISPOSALS = [
   '-',
@@ -431,7 +432,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
       {/* Main Headers */}
       <div className="text-center mb-6">
         <div className="font-bold underline text-lg">All Duties</div>
-        <div className="font-bold underline text-lg">155 UASU BAF</div>
+        <div className="font-bold underline text-lg">{getActiveOfficeIdentity().officeName}</div>
       </div>
 
       {/* Conditionally rendered Top Tables Flex */}

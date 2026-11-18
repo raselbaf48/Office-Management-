@@ -23,6 +23,7 @@ import { DutyRatioTable } from '../data/officialDutyRatioMatrix';
 
 
 import { formatRank } from './rankFormatter';
+import { getActiveOfficeIdentity } from '../firebase';
 export { formatRank };
 
 const formatRunningLetter = (text: string) => {
@@ -351,7 +352,7 @@ export async function exportIdacRosterDocx(
         alignment: AlignmentType.RIGHT,
         children: [
           new TextRun({
-            text: authorizedBy.unit || '155 UASU BAF',
+            text: authorizedBy.unit || getActiveOfficeIdentity().officeName || '155 UASU BAF',
             font: 'Arial',
             bold: true,
             size: 18,
@@ -420,7 +421,7 @@ export async function exportNominalRollDocx(
       spacing: { after: 180 },
       children: [
         new TextRun({
-          text: '155 UASU BAF',
+          text: getActiveOfficeIdentity().officeName || '155 UASU BAF',
           font: 'Arial',
           bold: true,
           size: 26,
@@ -496,7 +497,7 @@ export async function exportDutyRatioDocx(
       spacing: { after: 60 },
       children: [
         new TextRun({
-          text: 'OFFICIAL DUTY RATIO & FLIGHT QUOTA MATRIX : 155 UASU BAF',
+          text: `OFFICIAL DUTY RATIO & FLIGHT QUOTA MATRIX : ${(getActiveOfficeIdentity().officeName || '155 UASU BAF').toUpperCase()}`,
           font: 'Arial',
           bold: true,
           size: 26,
@@ -671,10 +672,11 @@ export async function exportParadeStateSingleDocx(
   const isPt = documentType === 'PT';
   const finalTitle = documentTitle || (isPt ? 'PT STATE : AIRMEN' : 'PARADE STATE : AIRMEN');
 
+  const activeOfficeName = getActiveOfficeIdentity().officeName || '155 UASU BAF';
   const unitLabel =
     flight === 'Overall'
-      ? '155 UASU BAF'
-      : `155 UASU BAF (${flight.toUpperCase()} FLT)`;
+      ? activeOfficeName
+      : `${activeOfficeName} (${flight.toUpperCase()} FLT)`;
 
   const docChildren: any[] = [
     new Paragraph({
@@ -750,7 +752,7 @@ export async function exportParadeStateSingleDocx(
 
   const dataRow = new TableRow({ cantSplit: true,
     children: [
-      createArialDataCell('155 UASU BAF', 1500, AlignmentType.CENTER),
+      createArialDataCell(activeOfficeName, 1500, AlignmentType.CENTER),
       createArialDataCell(String(stats.totalStr), 680, AlignmentType.CENTER),
       createArialDataCell(valOrDash(stats.detTdyCount), 680, AlignmentType.CENTER),
       createArialDataCell(String(stats.effStr), 680, AlignmentType.CENTER),
@@ -1115,7 +1117,7 @@ export async function exportParadeStateSingleDocx(
             alignment: AlignmentType.LEFT,
             children: [
               new TextRun({
-                text: '155 UASU BAF',
+                text: activeOfficeName,
                 font: 'Arial',
                 size: 24,
               }),
@@ -1177,7 +1179,7 @@ export async function exportParadeStateSingleDocx(
             alignment: AlignmentType.LEFT,
             children: [
               new TextRun({
-                text: '155 UASU BAF',
+                text: activeOfficeName,
                 font: 'Arial',
                 size: 24,
               }),
@@ -1235,7 +1237,7 @@ export async function exportParadeStateSingleDocx(
   });
 
   const targetFileName =
-    fileName || `${isPt ? 'PT State' : 'Parade State'} - ${flight === 'Overall' ? '155 UASU' : flight + ' Flt'} (${dateStr}).docx`;
+    fileName || `${isPt ? 'PT State' : 'Parade State'} - ${flight === 'Overall' ? activeOfficeName : flight + ' Flt'} (${dateStr}).docx`;
   const blob = await Packer.toBlob(doc);
   saveAs(blob, targetFileName);
 }
@@ -1485,7 +1487,7 @@ export async function exportMonthlyDutyRegisterDocx(
       spacing: { after: 40 },
       children: [
         new TextRun({
-          text: 'MONTHLY ATTENDANCE REGISTER : 155 UASU BAF',
+          text: `MONTHLY ATTENDANCE REGISTER : ${(getActiveOfficeIdentity().officeName || '155 UASU BAF').toUpperCase()}`,
           font: 'Arial',
           bold: true,
           size: 26,

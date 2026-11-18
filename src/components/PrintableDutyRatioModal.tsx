@@ -8,6 +8,7 @@ import { exportHtmlToWord } from '../utils/htmlExport';
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { localDb } from '../services/localDatabase';
 import { calculateExactDutyRatios, roundDutyByRule } from '../utils/dutyDistribution';
+import { getActiveOfficeIdentity } from '../firebase';
 
 export function formatDisplayDate(dateStr?: string): string {
   if (!dateStr) {
@@ -272,7 +273,7 @@ export const PrintableDutyRatioModal: React.FC<PrintableDutyRatioModalProps> = (
 
   const getPdfTitle = () => {
     const displayDt = formatDisplayDate(targetDate);
-    return `Duty Ratio -155 UASU (Dt - ${displayDt})`;
+    return `Duty Ratio - ${getActiveOfficeIdentity().officeName} (Dt - ${displayDt})`;
   };
 
   const handlePrint = () => {
@@ -379,7 +380,7 @@ export const PrintableDutyRatioModal: React.FC<PrintableDutyRatioModalProps> = (
 
   const handleExportExcel = () => {
     const displayDt = formatDisplayDate(targetDate);
-    const fileName = `Duty Ratio -155 UASU (Dt - ${displayDt}).xlsx`;
+    const fileName = `Duty Ratio - ${getActiveOfficeIdentity().officeName} (Dt - ${displayDt}).xlsx`;
     if (isFlightFiltered) {
       exportFlightDutyScheduleExcel(
         matrix,
@@ -401,7 +402,7 @@ export const PrintableDutyRatioModal: React.FC<PrintableDutyRatioModalProps> = (
 
   const handleExportDoc = () => {
     const displayDt = formatDisplayDate(targetDate);
-    const docName = `Duty Ratio -155 UASU (Dt - ${displayDt}).doc`;
+    const docName = `Duty Ratio - ${getActiveOfficeIdentity().officeName} (Dt - ${displayDt}).doc`;
     exportHtmlToWord('print-duty-ratio-content', docName, pageOrientation);
   };
 
@@ -708,7 +709,7 @@ export const PrintableDutyRatioModal: React.FC<PrintableDutyRatioModalProps> = (
           {/* MAIN DOCUMENT HEADER */}
           <div className="text-center mb-6">
             <h2 className="text-lg font-black underline uppercase">{getPageMainTitle()}</h2>
-            <h3 className="text-base font-black uppercase">155 UASU BAF</h3>
+            <h3 className="text-base font-black uppercase">{getActiveOfficeIdentity().officeName}</h3>
             {targetDate && <p className="text-sm sm:text-base font-black text-black mt-1">Date: {formatDisplayDate(targetDate)}</p>}
           </div>
 

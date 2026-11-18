@@ -40,6 +40,7 @@ import { PrintableDutyRatioModal, formatDisplayDate } from "./PrintableDutyRatio
 import { AutoAllocateModal } from './AutoAllocateModal';
 import { DateNavigator } from './DateNavigator';
 import { RatioHistoryModal } from './RatioHistoryModal';
+import { getActiveOfficeIdentity } from '../firebase';
 
 interface DutyRatioMatrixViewProps {
   role?: UserRole;
@@ -310,7 +311,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   };
 
   const handleReset = () => {
-    if (window.confirm('Reset all duty ratios to the official BAF 155 UASU default template?')) {
+    if (window.confirm(`Reset all duty ratios to the official ${getActiveOfficeIdentity().officeName} default template?`)) {
       const def = resetDutyMatrixToDefault();
       setMatrix(def);
       setIsSaved(true);
@@ -389,7 +390,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
           <div>
             <div className="flex items-center space-x-2">
               <h1 className="text-xl font-black tracking-tight text-slate-900 dark:text-slate-100">
-                155 UASU BAF • Duty Ratio
+                {getActiveOfficeIdentity().officeName} • Duty Ratio
               </h1>
               <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-300 border border-slate-300 dark:border-slate-700">
                 Official Roster Scale

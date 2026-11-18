@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { PenTool, Check, X, Shield, FileCheck, RotateCcw } from 'lucide-react';
+import { getActiveOfficeIdentity, isDefault155UasuOffice } from '../firebase';
 
 export interface IdacSignatureDetails {
   name: string;
@@ -20,11 +21,21 @@ export const DEFAULT_IDAC_SIGNATURE: IdacSignatureDetails = {
 };
 
 export function getSavedIdacSignature(): IdacSignatureDetails {
+  const fallback: IdacSignatureDetails = isDefault155UasuOffice()
+    ? DEFAULT_IDAC_SIGNATURE
+    : {
+        name: '',
+        rank: '',
+        designation: 'Adjutant',
+        unit: getActiveOfficeIdentity().officeName || '',
+        signDigitally: false,
+        digitalSignatureText: '',
+      };
   try {
     const saved = localStorage.getItem('baf_idac_sign_authorized_by');
-    if (saved) return { ...DEFAULT_IDAC_SIGNATURE, ...JSON.parse(saved) };
+    if (saved) return { ...fallback, ...JSON.parse(saved) };
   } catch (e) {}
-  return DEFAULT_IDAC_SIGNATURE;
+  return fallback;
 }
 
 export function saveIdacSignature(details: IdacSignatureDetails): void {
@@ -65,7 +76,7 @@ export const IdacSignatureModal: React.FC<IdacSignatureModalProps> = ({
       name: details.name.toUpperCase().trim(),
       rank: details.rank.trim(),
       designation: details.designation.trim(),
-      unit: details.unit.trim() || '155 UASU BAF',
+      unit: details.unit.trim() || getActiveOfficeIdentity().officeName || '155 UASU BAF',
       digitalSignatureText: details.signDigitally ? (details.digitalSignatureText?.trim() || details.name.trim()) : '',
     };
 
@@ -166,13 +177,13 @@ export const IdacSignatureModal: React.FC<IdacSignatureModalProps> = ({
 
           <div>
             <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
-              Unit <span className="text-slate-500 dark:text-slate-400 font-normal">(Default: 155 UASU BAF)</span>
+              Unit <span className="text-slate-500 dark:text-slate-400 font-normal">(Default: {getActiveOfficeIdentity().officeName})</span>
             </label>
             <input
               type="text"
               value={details.unit}
               onChange={(e) => setDetails({ ...details, unit: e.target.value })}
-              placeholder="155 UASU BAF"
+              placeholder={getActiveOfficeIdentity().officeName}
               className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm text-slate-900 dark:text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
           </div>
@@ -211,7 +222,7 @@ export const IdacSignatureModal: React.FC<IdacSignatureModalProps> = ({
           <div className="bg-slate-100/80 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800 p-4">
             <div className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 mb-2 flex items-center justify-between">
               <span>Live IDAC Duty Signature Preview (Bottom-Right)</span>
-              <span className="text-blue-600 dark:text-blue-400 font-mono">155 UASU BAF</span>
+              <span className="text-blue-600 dark:text-blue-400 font-mono">{getActiveOfficeIdentity().officeName}</span>
             </div>
             <div className="flex justify-end p-3 bg-white dark:bg-slate-900/60 rounded-lg border border-slate-200 dark:border-slate-800/80">
               <div className="text-left font-bold min-w-[190px]">
@@ -233,7 +244,7 @@ export const IdacSignatureModal: React.FC<IdacSignatureModalProps> = ({
                   <div className="text-xs uppercase font-black">{details.name || 'MAHIM RAAD SADAT'}</div>
                   <div className="text-[11px] font-normal">{details.rank || 'Flt Lt'}</div>
                   <div className="text-[11px] font-normal">{details.designation || 'Adjutant'}</div>
-                  <div className="text-[10px] uppercase font-bold">{details.unit || '155 UASU BAF'}</div>
+                  <div className="text-[10px] uppercase font-bold">{details.unit || getActiveOfficeIdentity().officeName}</div>
                   <div className="text-[11px] font-bold text-amber-700 dark:text-amber-300 mt-0.5">{rosterMonthDisplay}</div>
                 </div>
               </div>

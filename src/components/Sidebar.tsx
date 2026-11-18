@@ -101,9 +101,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   React.useEffect(() => {
     const syncIdentity = () => setOfficeIdentity(getActiveOfficeIdentity());
     window.addEventListener('baf_office_config_changed', syncIdentity);
+    window.addEventListener('baf_logo_updated', syncIdentity);
+    window.addEventListener('baf_settings_updated', syncIdentity);
     window.addEventListener('storage', syncIdentity);
     return () => {
       window.removeEventListener('baf_office_config_changed', syncIdentity);
+      window.removeEventListener('baf_logo_updated', syncIdentity);
+      window.removeEventListener('baf_settings_updated', syncIdentity);
       window.removeEventListener('storage', syncIdentity);
     };
   }, []);
@@ -202,7 +206,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   {officeIdentity.officeName}
                 </div>
                 <div className="text-[10px] font-bold text-[#059669] dark:text-amber-400 uppercase tracking-wider truncate">
-                  Intel • Surveillance • Strike
+                  {officeIdentity.officeSlogan || 'Intel • Surveillance • Strike'}
                 </div>
               </div>
             </div>

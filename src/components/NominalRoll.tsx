@@ -12,6 +12,7 @@ import { localDb } from '../services/localDatabase';
 import { formatShortDate, normalizeDateToISO } from '../utils/csvExport';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
+import { getActiveOfficeIdentity, isDefault155UasuOffice } from '../firebase';
 interface NominalRollProps {
   variant?: 'nominal' | 'biodata';
   airmen: Airman[];
@@ -136,7 +137,7 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
             </span>
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Complete Airmen list for 155 UASU BAF • Sorted by Rank Seniority & BD Number.
+            Complete Airmen list for {getActiveOfficeIdentity().officeName} • Sorted by Rank Seniority & BD Number.
           </p>
         </div>
 
@@ -187,7 +188,7 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
       {syncStatus && (
         <div className="bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs px-4 py-2.5 rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
           <span className="font-semibold">{syncStatus}</span>
-          <span className="font-mono text-[10px] text-emerald-400 opacity-80">155 UASU BAF Sheet Connected</span>
+          <span className="font-mono text-[10px] text-emerald-400 opacity-80">{getActiveOfficeIdentity().officeName} Sheet Connected</span>
         </div>
       )}
 
@@ -316,7 +317,9 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                           {(() => {
                             const fn = airman.fullName || (airman as any)['Full Name'];
                             if (fn && fn !== airman.name) return fn;
-                            const initMatch = INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id));
+                            const initMatch = isDefault155UasuOffice()
+                              ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))
+                              : undefined;
                             return initMatch?.fullName || fn || airman.name;
                           })()}
                         </span>
@@ -347,20 +350,22 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                       {(() => {
                         const fl = airman.flightName || (airman as any).flight || (airman as any).Flight;
                         if (fl && fl.trim()) return fl;
-                        const initMatch = INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id));
+                        const initMatch = isDefault155UasuOffice()
+                          ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))
+                          : undefined;
                         return initMatch?.flightName || 'Admin';
                       })()}
                     </span>
                   </td>
                   {variant === 'biodata' && (
                     <td className="py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">
-                      {airman.bloodGroup || (INITIAL_AIRMEN.find(i => i.bdNo === airman.bdNo)?.bloodGroup) || '-'}
+                      {airman.bloodGroup || (isDefault155UasuOffice() ? INITIAL_AIRMEN.find(i => i.bdNo === airman.bdNo)?.bloodGroup : undefined) || '-'}
                     </td>
                   )}
                   {variant === 'biodata' && (
                     <td className="py-3 px-4">
                       {(() => {
-                        const emailVal = airman.email || (airman as any).gmail || INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))?.email;
+                        const emailVal = airman.email || (airman as any).gmail || (isDefault155UasuOffice() ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))?.email : undefined);
                         if (emailVal) {
                           return (
                             <a

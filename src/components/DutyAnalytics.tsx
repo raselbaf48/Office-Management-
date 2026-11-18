@@ -4,6 +4,7 @@ import { Airman, AirmanDutyStats, ConflictAlert, FlightName, DutyAssignment } fr
 import { DUTY_TYPES, DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { BarChart3, ShieldCheck, AlertCircle, Award, Scale, Layers, RefreshCw, Calendar, X, ChevronLeft, ChevronRight, Printer } from 'lucide-react';
 import { calculateDutyStats, getDaysInMonth } from '../data/rosterGenerator';
+import { getActiveOfficeIdentity } from '../firebase';
 
 interface DutyAnalyticsProps {
   airmen: Airman[];
@@ -18,7 +19,7 @@ export const DutyAnalytics: React.FC<DutyAnalyticsProps> = ({ airmen, onViewProf
   const monthKey = `${currentYear}-${currentMonth.toString().padStart(2, '0')}`;
 
   const [assignments, setAssignments] = useState<DutyAssignment[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(false);
   
   const [customHolidays, setCustomHolidays] = useState<string[]>(() => {
     try {
@@ -43,7 +44,6 @@ export const DutyAnalytics: React.FC<DutyAnalyticsProps> = ({ airmen, onViewProf
   const [isCalendarOpen, setIsCalendarOpen] = useState<boolean>(false);
 
   const fetchAnalytics = async () => {
-    setLoading(true);
     try {
       const res = await fetch(`/api/analytics?month=${monthKey}`);
       if (res.ok) {
@@ -444,7 +444,7 @@ export const DutyAnalytics: React.FC<DutyAnalyticsProps> = ({ airmen, onViewProf
               </div>
             ) : (
               <span className="text-xs text-slate-400 font-medium">
-                Showing overall unit duty metrics (155 UASU)
+                Showing overall unit duty metrics ({getActiveOfficeIdentity().officeName})
               </span>
             )}
           </div>

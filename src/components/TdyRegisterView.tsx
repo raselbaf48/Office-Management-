@@ -9,6 +9,7 @@ import { getOptimalMinColumnWidth } from '../utils/tableUtils';
 import { EntryHistoryModal } from './EntryHistoryModal';
 import { getAirmanDisposalForRange } from '../utils/airmanDisposalHelper';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
+import { getActiveOfficeIdentity } from '../firebase';
 interface TdyRegisterViewProps {
   role?: UserRole;
   airmen: Airman[];
@@ -44,7 +45,7 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
   const [selectedYear, setSelectedYear] = useState<string>(() => String(new Date().getFullYear()));
   const [summaryFilter, setSummaryFilter] = useState<'OnTdy' | 'TotalTdy' | 'Available' | null>(null);
   const [tdyData, setTdyData] = useState<Record<string, TdyRecord>>({});
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(false);
   const [showHistoryModal, setShowHistoryModal] = useState<boolean>(false);
 
   // Grant / Record TDY Modal
@@ -105,7 +106,6 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
 
   // Fetch all assignments for the year to calculate TDY days
   const fetchTdyRecords = async () => {
-    setLoading(true);
     try {
       const months = Array.from({ length: 12 }, (_, i) => {
         const m = String(i + 1).padStart(2, '0');
@@ -315,7 +315,7 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
               <MapPin className="w-4 h-4" />
               <span>Temporary Duty (TDY) Tracking</span>
               <span>•</span>
-              <span>155 UASU BAF</span>
+              <span>{getActiveOfficeIdentity().officeName}</span>
             </div>
             <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
               Annual TDY Register

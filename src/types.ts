@@ -55,6 +55,11 @@ export interface Airman {
   photoUrl?: string;
   isProtected?: boolean;
   role?: string;
+  sqn?: string;
+  wing?: string;
+  status?: string;
+  medicalCategory?: string;
+  basicCategory?: string;
 }
 
 export interface DutyTypeInfo {

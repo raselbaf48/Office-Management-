@@ -15,6 +15,8 @@ import { getCurrentUserSession } from '../utils/authSession';
 import { checkDutyPermission, isDateInPast } from '../utils/dutyPermissions';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { getAirmanJoinDateISO, getAirmanLeftDateISO, isAirmanInUnitForMonth } from '../utils/csvExport';
+import { getActiveOfficeIdentity } from '../firebase';
+import { localDb } from '../services/localDatabase';
 interface RestoreItem {
   airmanId: string;
   date: string;
@@ -82,9 +84,16 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
     return () => window.removeEventListener('baf_state_updated', syncHolidays);
   }, []);
 
-  const [assignments, setAssignments] = useState<DutyAssignment[]>([]);
+  const [assignments, setAssignments] = useState<DutyAssignment[]>(() => {
+    try {
+      const initMonthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+      return localDb.getRoster(initMonthKey).assignments || [];
+    } catch {
+      return [];
+    }
+  });
   const [allYearAssignments, setAllYearAssignments] = useState<DutyAssignment[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(false);
 
   // Map assignments by key "airmanId_YYYY-MM-DD"
   const assignmentMap = useMemo(() => {
@@ -620,7 +629,6 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
   };
 
   const fetchRoster = async () => {
-    setLoading(true);
     try {
       if (isFullYearView) {
         const res = await fetch(`/api/roster/year?year=${currentYear}`);
@@ -940,7 +948,7 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
             </span>
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Dynamic Attendance & Roster Matrix for 155 UASU BAF
+            Dynamic Attendance & Roster Matrix for {getActiveOfficeIdentity().officeName}
           </p>
         </div>
 
@@ -1153,14 +1161,14 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
             <div className="p-4 bg-slate-900 text-white flex flex-col sm:flex-row items-start sm:items-center justify-between border-b border-slate-800 gap-2">
               <div>
                 <h2 className="text-base font-black tracking-wider text-amber-400 uppercase">
-                  Duty Register : 155 UASU BAF
+                  Duty Register : {getActiveOfficeIdentity().officeName}
                 </h2>
                 <p className="text-xs text-slate-300 mt-0.5">
                   MONTH: <span className="font-bold text-white uppercase">{isFullYearView ? 'FULL YEAR (JAN - DEC)' : monthName}</span> | YEAR: <span className="font-bold text-white">{currentYear}</span> | Period: {isFullYearView ? `01 Jan ${currentYear} To 31 Dec ${currentYear}` : `01 ${monthName.substring(0, 3)} ${String(currentYear).slice(2)} To ${daysCount < 10 ? '0' + daysCount : daysCount} ${monthName.substring(0, 3)} ${String(currentYear).slice(2)}`}
                 </p>
               </div>
               <div className="text-right text-[10px] text-slate-400 font-mono hidden sm:block">
-                <div className="text-emerald-400 font-bold">155 UASU OFFICIAL REGISTER</div>
+                <div className="text-emerald-400 font-bold">{getActiveOfficeIdentity().officeName.toUpperCase()} OFFICIAL REGISTER</div>
                 <div>CONFIDENTIAL / BAF UNITS</div>
               </div>
             </div>

@@ -1,3 +1,5 @@
+import { isDefault155UasuOffice } from '../firebase';
+
 export interface IdacEmergencyContact {
   id: string;
   name: string;
@@ -156,16 +158,17 @@ export const saveIdacResponsibilities = (list: IdacResponsibility[]): void => {
 };
 
 export const getIdacEmergencyContacts = (): IdacEmergencyContact[] => {
+  const defaultContactsForOffice = isDefault155UasuOffice() ? DEFAULT_CONTACTS : [];
   try {
     const raw = localStorage.getItem(CONTACTS_KEY) || localStorage.getItem('baf_idac_emergency_contacts');
-    if (!raw) return sortContactsBySeniority(DEFAULT_CONTACTS);
+    if (!raw) return sortContactsBySeniority(defaultContactsForOffice);
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length > 0) {
       return sortContactsBySeniority(parsed);
     }
-    return sortContactsBySeniority(DEFAULT_CONTACTS);
+    return sortContactsBySeniority(defaultContactsForOffice);
   } catch {
-    return sortContactsBySeniority(DEFAULT_CONTACTS);
+    return sortContactsBySeniority(defaultContactsForOffice);
   }
 };
 

@@ -33,16 +33,22 @@ import {
   generateOfficeCodeFromName,
   buildAutoCloudFirebaseConfig,
   fetchRegisteredOfficesFromMaster,
+  purgeOfficeLocalStorageKeys,
+  updateActiveOfficeProfile,
 } from '../firebase';
 import {
   getDetailedUsers,
   saveDetailedUsers,
   provisionMasterOwnerInOffice,
+  buildMasterOwnerUserRecord,
 } from '../utils/authSession';
 import {
   pushUserProfilesToFirebase,
   fetchUserProfilesFromFirebase,
+  purgeActiveCustomOfficeCloudData,
 } from '../services/firebaseFirestoreService';
+import { localDb } from '../services/localDatabase';
+import { resetDutyMatrixToDefault } from '../data/officialDutyRatioMatrix';
 import { saveLastUsedIdForPortal } from '../services/portalPreferenceService';
 import { useGlobalTheme } from '../utils/themeManager';
 import { Airman, DetailedUserLogin } from '../types';
@@ -72,6 +78,12 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
   const [officeName, setOfficeName] = useState<string>(existingConfig?.officeName || '');
   const [officeLogo, setOfficeLogo] = useState<string>(
     existingConfig?.officeLogo || '/155-uasu-baf-logo.png'
+  );
+  const [officeSlogan, setOfficeSlogan] = useState<string>(
+    existingConfig?.officeSlogan || 'Intel • Surveillance • Strike'
+  );
+  const [officeBase, setOfficeBase] = useState<string>(
+    existingConfig?.officeBase || 'BAF BASE ZHR'
   );
   const [logoUploadError, setLogoUploadError] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -266,23 +278,49 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
         cleanJoinPin || undefined
       );
 
+      const resolvedSlogan = officeSlogan.trim() || 'Intel • Surveillance • Strike';
+      const resolvedBase = officeBase.trim() || 'BAF BASE ZHR';
+      const resolvedLogo = officeLogo.trim() || '/155-uasu-baf-logo.png';
+
       const newOfficeConfig: CustomOfficeConfig = {
         officeName: officeName.trim(),
-        officeLogo: officeLogo.trim() || '/155-uasu-baf-logo.png',
+        officeLogo: resolvedLogo,
+        officeSlogan: resolvedSlogan,
+        officeBase: resolvedBase,
         officeCode: cleanCode,
         ...(cleanJoinPin ? { joinPin: cleanJoinPin } : {}),
-        firebaseConfig: autoFirebaseConfig,
+        firebaseConfig: {
+          ...autoFirebaseConfig,
+          officeSlogan: resolvedSlogan,
+          officeBase: resolvedBase,
+        },
         configuredAt: new Date().toISOString(),
         adminUserId: cleanAdminId,
       };
 
-      // 1. Save custom_office_config & initialize officeApp / officeDb / officeAuth
-      saveCustomOfficeConfig(newOfficeConfig);
+      // 1. Purge any previous local storage keys for this office code & save brand-new config
+      purgeOfficeLocalStorageKeys(cleanCode);
+      saveCustomOfficeConfig(newOfficeConfig, { isBrandNew: true });
+      const savedProfile = updateActiveOfficeProfile({
+        officeName: officeName.trim(),
+        officeLogo: resolvedLogo,
+        officeSlogan: resolvedSlogan,
+        officeBase: resolvedBase,
+      });
+      localDb.switchActiveOfficeWorkspace(true);
+      localDb.syncSettingToCloud('baf_office_profile_v1', JSON.stringify(savedProfile));
+      resetDutyMatrixToDefault();
+      localStorage.setItem('baf_custom_office_clean_v3', 'true');
+      localStorage.setItem('baf_recent_logins', JSON.stringify([cleanAdminId]));
 
-      // 2. Create the Office Admin account in detailedUsers & push to Firebase
-      const existingUsers = getDetailedUsers(airmen);
+      // 2. Purge any stale/leaked cloud docs for this office code so it starts 100% brand new
+      await purgeActiveCustomOfficeCloudData().catch(() => {});
+      localDb.syncSettingToCloud('baf_office_profile_v1', JSON.stringify(savedProfile));
+
+      // 3. Create ONLY the Office Admin account & protected Master Owner (`48456`) — zero 155 UASU users
+      const nowIso = new Date().toISOString();
       const adminRecord: DetailedUserLogin = {
-        id: `user-login-${cleanAdminId}`,
+        id: `office-admin-${cleanAdminId}`,
         airmanId: `admin-${cleanAdminId}`,
         bdNo: cleanAdminId,
         userId: cleanAdminId,
@@ -295,26 +333,18 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
         pin: cleanPin,
         adminPass: cleanPin,
         status: 'ACTIVE',
-        detailedAt: new Date().toISOString(),
+        detailedAt: nowIso,
         detailedBy: 'Office Setup Wizard',
+        updatedAt: nowIso,
       };
+      const masterRecord = buildMasterOwnerUserRecord();
+      const brandNewUsers: DetailedUserLogin[] = [masterRecord, adminRecord];
+      saveDetailedUsers(brandNewUsers, true);
 
-      const filteredUsers = existingUsers.filter(
-        (u) => (u.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase() !== cleanAdminId.toLowerCase()
-      );
-      filteredUsers.push(adminRecord);
-      saveDetailedUsers(filteredUsers);
+      await pushUserProfilesToFirebase(brandNewUsers).catch(() => {});
 
-      await pushUserProfilesToFirebase([adminRecord]).catch(() => {});
-
-      // 3. Auto-provision Master Owner account (`48456`) in Local Storage & Office Firebase
-      await provisionMasterOwnerInOffice(airmen);
-
-      // 4. Register this office in Master Owner Telemetry (`registered_offices`)
-      const nonMasterUserCount = filteredUsers.filter(
-        (u) => (u.bdNo || '').replace(/^BD\/?/i, '').trim() !== '48456' && u.role !== 'master_owner'
-      ).length;
-      await registerOfficeInMasterTelemetry(newOfficeConfig, Math.max(1, nonMasterUserCount));
+      // 4. Register this office in Master Owner Telemetry (`registered_offices`) with 1 user (Admin)
+      await registerOfficeInMasterTelemetry(newOfficeConfig, 1);
 
       // Pre-fill the admin's User ID on the login screen
       saveLastUsedIdForPortal('Office', cleanAdminId);
@@ -395,6 +425,8 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
       const connectedConfig: CustomOfficeConfig = {
         officeName: matched.officeName,
         officeLogo: matched.officeLogo || '/155-uasu-baf-logo.png',
+        officeSlogan: matched.officeSlogan || matched.firebaseConfig?.officeSlogan || 'Intel • Surveillance • Strike',
+        officeBase: matched.officeBase || matched.firebaseConfig?.officeBase || 'BAF BASE ZHR',
         officeCode:
           matched.officeCode ||
           matched.firebaseConfig?.officeCode ||
@@ -407,6 +439,12 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
       };
 
       saveCustomOfficeConfig(connectedConfig);
+      updateActiveOfficeProfile({
+        officeName: connectedConfig.officeName,
+        officeLogo: connectedConfig.officeLogo,
+        officeSlogan: connectedConfig.officeSlogan,
+        officeBase: connectedConfig.officeBase,
+      });
 
       // Ensure 48456 is provisioned locally & sync existing office users from Firebase
       await provisionMasterOwnerInOffice(airmen);
@@ -518,7 +556,7 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
               {mode === 'NEW_OFFICE' &&
                 `Step ${wizardStep} of 3 — ${
                   wizardStep === 1
-                    ? 'Office Identity & Branding'
+                    ? 'Office Profile (UNIT/SQN, Logo, Slogan & Base)'
                     : wizardStep === 2
                     ? 'Office Workspace Code & Join PIN'
                     : 'Create Office Admin Account'
@@ -560,7 +598,7 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
-                    Launch a new unit workspace in 3 easy steps: set Office Name & Logo, generate a short Office Code, and create your Admin PIN.
+                    Launch a new unit workspace in 3 easy steps: set UNIT/SQN, Logo, Slogan & Base, generate a short Office Code, and create your Admin PIN.
                   </p>
                 </div>
               </button>
@@ -626,10 +664,10 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
 
               {/* STEP 1: OFFICE IDENTITY */}
               {wizardStep === 1 && (
-                <form onSubmit={handleStep1Next} className="space-y-4 text-left">
+                <form onSubmit={handleStep1Next} className="space-y-3.5 text-left">
                   <div className="space-y-1.5">
                     <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
-                      Office / Unit Name *
+                      UNIT / SQN Name *
                     </label>
                     <input
                       type="text"
@@ -640,10 +678,53 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
                           setOfficeCode(generateOfficeCodeFromName(e.target.value));
                         }
                       }}
-                      placeholder="e.g. 155 UASU BAF or HQ Admin Wing"
+                      placeholder="e.g. 155 UASU BAF or 21 SQN BAF"
                       className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
                       required
                       autoFocus
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                      Base Name *
+                    </label>
+                    <input
+                      type="text"
+                      value={officeBase}
+                      onChange={(e) => setOfficeBase(e.target.value)}
+                      placeholder="e.g. BAF BASE ZHR"
+                      className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                      required
+                    />
+                    <div className="flex flex-wrap gap-1 pt-0.5">
+                      {['BAF BASE ZHR', 'BAF BASE BSR', 'BAF BASE AKR', 'BAF BASE MTR', 'BAF BASE PKP', 'BAF BASE CXB', 'AIR HQ'].map((b) => (
+                        <button
+                          key={b}
+                          type="button"
+                          onClick={() => setOfficeBase(b)}
+                          className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition-colors cursor-pointer ${
+                            officeBase.trim().toUpperCase() === b
+                              ? 'bg-emerald-600 text-white border-emerald-500'
+                              : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-emerald-500/50'
+                          }`}
+                        >
+                          {b}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                      Office Slogan
+                    </label>
+                    <input
+                      type="text"
+                      value={officeSlogan}
+                      onChange={(e) => setOfficeSlogan(e.target.value)}
+                      placeholder="e.g. Intel • Surveillance • Strike"
+                      className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-semibold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
                     />
                   </div>
 

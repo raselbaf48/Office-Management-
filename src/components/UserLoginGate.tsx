@@ -1,9 +1,28 @@
-import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
-import { Airman } from '../types';
+import React, { useState, useEffect, useRef } from 'react';
+import { Airman, DetailedUserLogin, Rank, FlightName } from '../types';
 import { Logo155UASU } from './Logo155UASU';
 import { OfficeSetupPortal } from './OfficeSetupPortal';
 import { AppOwnerMasterPortal } from './AppOwnerMasterPortal';
-import { X, Shield, AlertCircle, CheckCircle2, Lock, LogIn, ChevronRight, Eye, EyeOff, Loader2, Sparkles, Check, Sun, Moon, Monitor, Settings } from 'lucide-react';
+import {
+  X,
+  Shield,
+  AlertCircle,
+  CheckCircle2,
+  Lock,
+  LogIn,
+  ChevronRight,
+  Eye,
+  EyeOff,
+  Loader2,
+  Sparkles,
+  Check,
+  Sun,
+  Moon,
+  Monitor,
+  Settings,
+  UserPlus,
+  ArrowLeft,
+} from 'lucide-react';
 import { motion } from 'motion/react';
 import { getAppConfig, isFeatureActive } from '../utils/appConfig';
 import { useGlobalTheme } from '../utils/themeManager';
@@ -11,10 +30,10 @@ import {
   hasCustomOfficeConfig,
   getActiveOfficeIdentity,
 } from '../firebase';
+import { localDb } from '../services/localDatabase';
+import { pushUserProfilesToFirebase } from '../services/firebaseFirestoreService';
 
-const AppUpdateModal = lazy(() =>
-  import('./AppUpdateModal').then((m) => ({ default: m.AppUpdateModal }))
-);
+import { AppUpdateModal } from './AppUpdateModal';
 
 import {
   setUserSession,
@@ -66,9 +85,13 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       setOfficeIdentity(getActiveOfficeIdentity());
     };
     window.addEventListener('baf_office_config_changed', syncConfigState);
+    window.addEventListener('baf_logo_updated', syncConfigState);
+    window.addEventListener('baf_settings_updated', syncConfigState);
     window.addEventListener('storage', syncConfigState);
     return () => {
       window.removeEventListener('baf_office_config_changed', syncConfigState);
+      window.removeEventListener('baf_logo_updated', syncConfigState);
+      window.removeEventListener('baf_settings_updated', syncConfigState);
       window.removeEventListener('storage', syncConfigState);
     };
   }, []);
@@ -94,12 +117,24 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const [passwordInput, setPasswordInput] = useState('');
   const [showPin, setShowPin] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>('');
+  const [registerSuccessBanner, setRegisterSuccessBanner] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSuccessAnimation, setIsSuccessAnimation] = useState<boolean>(false);
   const [successAirman, setSuccessAirman] = useState<Airman | null>(null);
   const [isUserIdFocused, setIsUserIdFocused] = useState<boolean>(false);
   const [isPasswordFocused, setIsPasswordFocused] = useState<boolean>(false);
   const [isConfirmFocused, setIsConfirmFocused] = useState<boolean>(false);
+
+  // User Registration Mode States
+  const [isRegisterMode, setIsRegisterMode] = useState<boolean>(false);
+  const [regUnit, setRegUnit] = useState<string>('');
+  const [regWing, setRegWing] = useState<string>('');
+  const [regRank, setRegRank] = useState<string>('');
+  const [regBdNo, setRegBdNo] = useState<string>('');
+  const [regName, setRegName] = useState<string>('');
+  const [regTrade, setRegTrade] = useState<string>('');
+  const [regFlight, setRegFlight] = useState<string>('');
+  const [isRegistering, setIsRegistering] = useState<boolean>(false);
 
   const [officeRecentLogins, setOfficeRecentLogins] = useState<string[]>(() => {
     try {
@@ -417,6 +452,132 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     setTargetAirman(null);
   };
 
+  const handleUserRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+    setRegisterSuccessBanner('');
+
+    const cleanBd = regBdNo.replace(/^BD\/?/i, '').replace(/[^0-9]/g, '').trim();
+    const cleanName = regName.trim();
+    const selectedUnit = regUnit.trim() || officeIdentity.officeName || '155 UASU BAF';
+    const selectedWing = regWing.trim() || 'Flying Wing';
+    const selectedRank = (regRank.trim() || 'LAC') as Rank;
+    const selectedTrade = regTrade.trim() || 'Radio Fitter';
+    const selectedFlight = (regFlight.trim() || 'Avionics') as FlightName;
+
+    if (!regRank) {
+      setErrorMsg('Please select your RANK.');
+      return;
+    }
+    if (!cleanBd) {
+      setErrorMsg('Please enter your USER ID (BD NO).');
+      return;
+    }
+    if (!cleanName) {
+      setErrorMsg('Please enter your NAME.');
+      return;
+    }
+    if (!regTrade) {
+      setErrorMsg('Please select your TRADE.');
+      return;
+    }
+    if (!regFlight) {
+      setErrorMsg('Please select your FLIGHT.');
+      return;
+    }
+
+    setIsRegistering(true);
+    try {
+      // 1. Add or update in Nominal Roll (localDb)
+      const currentAirmen = await localDb.getAirmen();
+      const existingAirman = currentAirmen.find(
+        (a) => (a.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase() === cleanBd.toLowerCase()
+      );
+
+      let createdOrUpdatedAirman: Airman;
+      if (existingAirman) {
+        createdOrUpdatedAirman = {
+          ...existingAirman,
+          rank: selectedRank,
+          name: cleanName,
+          fullName: cleanName,
+          trade: selectedTrade,
+          flightName: selectedFlight,
+          sqn: selectedUnit,
+          wing: selectedWing,
+        };
+        await localDb.updateAirman(existingAirman.id, createdOrUpdatedAirman);
+      } else {
+        createdOrUpdatedAirman = await localDb.addAirman({
+          bdNo: cleanBd,
+          rank: selectedRank,
+          name: cleanName,
+          fullName: cleanName,
+          trade: selectedTrade,
+          flightName: selectedFlight,
+          sqn: selectedUnit,
+          wing: selectedWing,
+          status: 'Active',
+          medicalCategory: 'AYE',
+          basicCategory: 'B1',
+          mobileNo: '',
+          bloodGroup: '',
+          livingStatus: 'Bilin',
+        } as any);
+      }
+
+      // 2. Add or update in User Management (DetailedUserLogin)
+      const nowIso = new Date().toISOString();
+      const detailedUsers = getDetailedUsers(await localDb.getAirmen());
+      const existingIdx = detailedUsers.findIndex(
+        (u) => (u.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase() === cleanBd.toLowerCase()
+      );
+
+      const newUserDetail: DetailedUserLogin = {
+        id: existingIdx >= 0 ? detailedUsers[existingIdx].id : `user-login-${cleanBd}`,
+        airmanId: createdOrUpdatedAirman.id || `airman-${cleanBd}`,
+        bdNo: cleanBd,
+        userId: cleanBd,
+        rank: selectedRank,
+        name: cleanName,
+        flightName: selectedFlight,
+        trade: selectedTrade,
+        role: existingIdx >= 0 ? detailedUsers[existingIdx].role : 'USER',
+        password: existingIdx >= 0 && detailedUsers[existingIdx].password ? detailedUsers[existingIdx].password : cleanBd,
+        pin: existingIdx >= 0 && detailedUsers[existingIdx].pin ? detailedUsers[existingIdx].pin : cleanBd,
+        status: 'ACTIVE',
+        detailedAt: existingIdx >= 0 ? detailedUsers[existingIdx].detailedAt : nowIso,
+        detailedBy: 'Self Registration',
+        updatedAt: nowIso,
+      };
+
+      let updatedUsers: DetailedUserLogin[];
+      if (existingIdx >= 0) {
+        updatedUsers = [...detailedUsers];
+        updatedUsers[existingIdx] = newUserDetail;
+      } else {
+        updatedUsers = [...detailedUsers, newUserDetail];
+      }
+
+      saveDetailedUsers(updatedUsers, true);
+      await pushUserProfilesToFirebase(updatedUsers).catch(() => {});
+
+      // 3. Switch back to Login screen with User ID pre-filled
+      setBdInput(cleanBd);
+      setPasswordInput('');
+      saveLastUsedIdForPortal('Office', cleanBd);
+      localStorage.setItem('baf_last_used_id', cleanBd);
+      setIsRegisterMode(false);
+      setRegisterSuccessBanner(
+        `Registered ${selectedRank} ${cleanName} (BD/${cleanBd})! Default PIN is ${cleanBd}.`
+      );
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Registration failed. Please try again.');
+    } finally {
+      setIsRegistering(false);
+    }
+  };
+
   // Unconfigured State (First Visit) OR when user clicks "⚙️ Switch / Configure Office"
   if (!isOfficeConfigured || showSetupWizard) {
     return (
@@ -445,13 +606,34 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     );
   }
 
+  const unitOptions = Array.from(
+    new Set([
+      officeIdentity.officeName || '155 UASU BAF',
+      '155 UASU BAF',
+      'Flying Wing',
+      'Maint Wing',
+      'Admin Wing',
+      '21 SQN BAF',
+      '1 SQN BAF',
+      '3 SQN BAF',
+      '8 SQN BAF',
+      '9 SQN BAF',
+      '25 SQN BAF',
+      '35 SQN BAF',
+      '101 SUL BAF',
+      '205 MU BAF',
+      'GE (Air) ZHR',
+      'MO (Air) ZHR',
+    ])
+  );
+
   return (
-    <div className="min-h-screen flex flex-col items-center bg-slate-50 dark:bg-slate-950 print:bg-white p-4 print:p-0 select-none overflow-x-hidden print:overflow-visible justify-center transition-colors">
+    <div className="min-h-screen flex flex-col items-center bg-slate-50 dark:bg-[#070b14] print:bg-white p-4 print:p-0 select-none overflow-x-hidden print:overflow-visible justify-center transition-colors">
       <div className="fixed top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none z-0 print:hidden" />
       <div className="fixed bottom-10 right-10 w-72 h-72 bg-sky-500/10 rounded-full blur-3xl pointer-events-none z-0 print:hidden" />
       
       {/* Content Area */}
-      <div className="w-full max-w-[325px] sm:max-w-[340px] relative z-10">
+      <div className={`w-full ${isRegisterMode ? 'max-w-[440px]' : 'max-w-[325px] sm:max-w-[340px]'} relative z-10 transition-all duration-200`}>
         
         <div className="flex items-center justify-center mb-3">
           <div
@@ -485,7 +667,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
           </div>
         </div>
 
-        <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 shadow-2xl space-y-4 sm:space-y-5 text-slate-900 dark:text-white text-center">
+        <div className="bg-white/95 dark:bg-[#0d1526]/95 backdrop-blur-xl border border-slate-200 dark:border-slate-800/90 rounded-2xl p-5 sm:p-7 shadow-2xl space-y-4 sm:space-y-5 text-slate-900 dark:text-white text-center">
           {/* Header */}
           <div className="flex flex-col items-center space-y-2.5">
             <div className="flex items-center justify-center p-1">
@@ -496,14 +678,29 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
               />
             </div>
             <div>
-              <div className="inline-flex items-center space-x-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-400 text-[10px] font-black uppercase tracking-widest mb-1">
+              <div className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-400 text-[10px] font-black uppercase tracking-widest mb-1.5">
                 <Shield className="w-3 h-3" />
-                <span>{isResetMode ? 'PASSWORD RECOVERY' : 'USER LOGIN PORTAL'}</span>
+                <span>
+                  {isRegisterMode
+                    ? 'USER REGISTER'
+                    : isResetMode
+                    ? 'PASSWORD RECOVERY'
+                    : 'USER LOGIN PORTAL'}
+                </span>
               </div>
-              <h1 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-white flex items-center justify-center space-x-2">
-                <span>{officeIdentity.officeName}</span>
+              <h1 className="text-xl sm:text-2xl font-black tracking-wide text-slate-900 dark:text-white flex items-center justify-center space-x-2 uppercase">
+                <span>
+                  {isRegisterMode
+                    ? officeIdentity.officeBase || 'BAF BASE ZHR'
+                    : officeIdentity.officeName}
+                </span>
               </h1>
-              {updateAvailable && (
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-0.5">
+                {isRegisterMode
+                  ? 'Register to Office Nominal Roll & User Management'
+                  : `${officeIdentity.officeBase || 'BAF BASE ZHR'} • ${officeIdentity.officeSlogan || 'Intel • Surveillance • Strike'}`}
+              </p>
+              {updateAvailable && !isRegisterMode && (
                 <button
                   type="button"
                   onClick={() => setIsUpdateModalOpen(true)}
@@ -520,6 +717,13 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
             <div className="p-3 bg-red-50 dark:bg-red-950/70 border border-red-200 dark:border-red-800 rounded-xl flex items-start space-x-2 text-left text-xs text-red-700 dark:text-red-200 animate-fadeIn">
               <AlertCircle className="w-4 h-4 text-red-500 dark:text-red-400 shrink-0 mt-0.5" />
               <span>{errorMsg}</span>
+            </div>
+          )}
+
+          {registerSuccessBanner && !isRegisterMode && (
+            <div className="p-3 bg-emerald-50 dark:bg-emerald-950/70 border border-emerald-200 dark:border-emerald-800 rounded-xl flex items-start space-x-2 text-left text-xs text-emerald-800 dark:text-emerald-200 animate-fadeIn">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+              <span>{registerSuccessBanner}</span>
             </div>
           )}
 
@@ -571,6 +775,166 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                 />
               </div>
             </motion.div>
+          ) : isRegisterMode ? (
+            /* USER REGISTER FORM (Matches Screenshot Layout) */
+            <form onSubmit={handleUserRegister} className="space-y-3.5 pt-1 text-left animate-fadeIn">
+              {/* Row 1: SQN / UNIT & WING */}
+              <div className="grid grid-cols-2 gap-3">
+                <select
+                  value={regUnit}
+                  onChange={(e) => setRegUnit(e.target.value)}
+                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
+                >
+                  <option value="">SQN / UNIT</option>
+                  {unitOptions.map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  value={regWing}
+                  onChange={(e) => setRegWing(e.target.value)}
+                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
+                >
+                  <option value="">WING</option>
+                  <option value="Flying Wing">Flying Wing</option>
+                  <option value="Maint Wing">Maint Wing</option>
+                  <option value="Admin Wing">Admin Wing</option>
+                  <option value="Ops Wing">Ops Wing</option>
+                  <option value="HQ">HQ</option>
+                  <option value="C&M">C&M</option>
+                </select>
+              </div>
+
+              {/* Row 2: RANK & USER ID (BD NO) */}
+              <div className="grid grid-cols-2 gap-3">
+                <select
+                  value={regRank}
+                  onChange={(e) => setRegRank(e.target.value)}
+                  required
+                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
+                >
+                  <option value="">RANK</option>
+                  <option value="MWO">MWO</option>
+                  <option value="SWO">SWO</option>
+                  <option value="WO">WO</option>
+                  <option value="Sgt">Sgt</option>
+                  <option value="Cpl">Cpl</option>
+                  <option value="LAC">LAC</option>
+                  <option value="AC-1">AC-1</option>
+                  <option value="AC-2">AC-2</option>
+                  <option value="Civilian">Civilian</option>
+                </select>
+
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={regBdNo}
+                  onChange={(e) => setRegBdNo(e.target.value.replace(/[^0-9]/g, ''))}
+                  placeholder="USER ID (BD NO)"
+                  required
+                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-400 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              {/* Row 3: NAME */}
+              <div>
+                <input
+                  type="text"
+                  value={regName}
+                  onChange={(e) => setRegName(e.target.value)}
+                  placeholder="NAME"
+                  required
+                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-400 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              {/* Row 4: TRADE & FLIGHT */}
+              <div className="grid grid-cols-2 gap-3">
+                <select
+                  value={regTrade}
+                  onChange={(e) => setRegTrade(e.target.value)}
+                  required
+                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
+                >
+                  <option value="">TRADE</option>
+                  <option value="Radio Fitter">Radio Fitter</option>
+                  <option value="Elect Fitter">Elect Fitter</option>
+                  <option value="Inst Fitter">Inst Fitter</option>
+                  <option value="A/F Fitter">A/F Fitter</option>
+                  <option value="Eng Fitter">Eng Fitter</option>
+                  <option value="Armt Fitter">Armt Fitter</option>
+                  <option value="LSE">LSE</option>
+                  <option value="Admin Asst">Admin Asst</option>
+                  <option value="Accts Asst">Accts Asst</option>
+                  <option value="Met Asst">Met Asst</option>
+                  <option value="Ops Asst">Ops Asst</option>
+                  <option value="GCI">GCI</option>
+                  <option value="ATCA">ATCA</option>
+                  <option value="Sec Asst (GD)">Sec Asst (GD)</option>
+                  <option value="Med Asst">Med Asst</option>
+                  <option value="MTF">MTF</option>
+                  <option value="MTD">MTD</option>
+                  <option value="Provost">Provost</option>
+                  <option value="Cypher Asst">Cypher Asst</option>
+                  <option value="Radar Op">Radar Op</option>
+                  <option value="AFSO">AFSO</option>
+                  <option value="Other">Other</option>
+                </select>
+
+                <select
+                  value={regFlight}
+                  onChange={(e) => setRegFlight(e.target.value)}
+                  required
+                  className="w-full px-3.5 py-3 rounded-xl bg-slate-50 dark:bg-[#070b14] border border-slate-300 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
+                >
+                  <option value="">FLIGHT</option>
+                  <option value="Avionics">Avionics</option>
+                  <option value="Mechanics">Mechanics</option>
+                  <option value="GCS">GCS</option>
+                  <option value="Admin">Admin</option>
+                  <option value="HQ">HQ</option>
+                  <option value="C&M">C&M</option>
+                  <option value="Ops">Ops</option>
+                  <option value="Flugzeug">Flugzeug</option>
+                  <option value="Weapon">Weapon</option>
+                </select>
+              </div>
+
+              {/* REGISTER Button */}
+              <button
+                type="submit"
+                disabled={isRegistering}
+                className="w-full py-3.5 px-4 rounded-xl bg-[#10b981] hover:bg-[#059669] text-slate-950 text-xs font-black tracking-wider uppercase transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-emerald-500/20 disabled:opacity-50 mt-2"
+              >
+                {isRegistering ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>REGISTERING...</span>
+                  </>
+                ) : (
+                  <>
+                    <UserPlus className="w-4 h-4 stroke-[2.5]" />
+                    <span>REGISTER</span>
+                  </>
+                )}
+              </button>
+
+              {/* Back to Login Button */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsRegisterMode(false);
+                  setErrorMsg('');
+                }}
+                className="w-full py-3 px-4 rounded-xl bg-slate-100 dark:bg-[#070b14]/90 hover:bg-slate-200 dark:hover:bg-slate-800/80 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Back to Login</span>
+              </button>
+            </form>
           ) : !isResetMode ? (
             <form onSubmit={handleSubmit} className="space-y-4 pt-1" ref={loginPinRef}>
               {(() => {
@@ -775,6 +1139,20 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                 )}
               </button>
 
+              <button
+                type="button"
+                onClick={() => {
+                  setErrorMsg('');
+                  setRegisterSuccessBanner('');
+                  setRegUnit(officeIdentity.officeName || '155 UASU BAF');
+                  setIsRegisterMode(true);
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-xs font-black tracking-wider uppercase transition-all flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <UserPlus className="w-4 h-4" />
+                <span>User Register</span>
+              </button>
+
               <div className="flex flex-col items-center space-y-2.5 mt-3">
                 <button
                   type="button"
@@ -967,15 +1345,13 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
 
       {/* In-App Software Update Modal on Login Screen - ONLY in APK */}
       {isRunningInApk() && (
-        <Suspense fallback={null}>
-          <AppUpdateModal
-            isOpen={isUpdateModalOpen}
-            onClose={() => setIsUpdateModalOpen(false)}
-            latestVersion={updateAvailable}
-            currentVersionCode={appVersionInfo.versionCode}
-            currentVersionName={appVersionInfo.versionName}
-          />
-        </Suspense>
+        <AppUpdateModal
+          isOpen={isUpdateModalOpen}
+          onClose={() => setIsUpdateModalOpen(false)}
+          latestVersion={updateAvailable}
+          currentVersionCode={appVersionInfo.versionCode}
+          currentVersionName={appVersionInfo.versionName}
+        />
       )}
 
     </div>

@@ -14,6 +14,7 @@ import { FlightDutyRatioModal } from './FlightDutyRatioModal';
 import { EntryHistoryModal } from './EntryHistoryModal';
 import { AssignDutyModal } from './AssignDutyModal';
 import { SignatureConfigModal } from './SignatureConfigModal';
+import { getActiveOfficeIdentity } from '../firebase';
 
 interface DashboardParadeStateProps {
   role?: UserRole;
@@ -161,7 +162,7 @@ export const DashboardParadeState: React.FC<DashboardParadeStateProps> = ({
         <div>
           <div className="flex items-center space-x-2">
             <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">
-              155 UASU BAF • Operations Dashboard
+              {getActiveOfficeIdentity().officeName} • Operations Dashboard
             </h1>
             <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300">
               Active Unit

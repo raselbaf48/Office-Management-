@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { Airman, UserRole, FlightName } from '../types';
 import { Logo155UASU } from './Logo155UASU';
+import { getActiveOfficeIdentity } from '../firebase';
 import {
   getIdacResponsibilities,
   getIdacEmergencyContacts,
@@ -53,7 +54,7 @@ export const IdaCenterDutyView: React.FC<IdaCenterDutyViewProps> = ({
   const [currentTime, setCurrentTime] = useState<string>('');
   const [currentDateFormatted, setCurrentDateFormatted] = useState<string>('');
   const [scheduleList, setScheduleList] = useState<IdaScheduleItem[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(false);
 
   // IDAC Settings Modal (Responsibilities & Emergency Contacts)
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
@@ -128,7 +129,6 @@ export const IdaCenterDutyView: React.FC<IdaCenterDutyViewProps> = ({
 
   // Fetch / assemble IDA center live schedule
   const fetchIdaSchedule = async () => {
-    setLoading(true);
     try {
       const now = new Date();
       const baseDate = selectedDate ? new Date(selectedDate) : now;
@@ -472,7 +472,7 @@ export const IdaCenterDutyView: React.FC<IdaCenterDutyViewProps> = ({
                 IDA Center Duty
               </h1>
               <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-wider rounded-md bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
-                155 UASU
+                {getActiveOfficeIdentity().officeName}
               </span>
             </div>
             <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mt-0.5">

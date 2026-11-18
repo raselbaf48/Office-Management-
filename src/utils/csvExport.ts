@@ -5,6 +5,7 @@ import { Airman, DutyAssignment } from '../types';
 import { formatRank } from './rankFormatter';
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { resolveAirmanDutyForDate, addAssignmentToMap, calculateDutyStats } from '../data/rosterGenerator';
+import { getActiveOfficeIdentity } from '../firebase';
 
 export function normalizeDateToISO(val: any): string {
   if (!val) return '';
@@ -247,7 +248,8 @@ export function exportDutyRatioMatrixCSV(
   const rows: string[][] = [];
 
   // Top header comments matching user template structure
-  rows.push(['# BAF 155 UASU - OFFICIAL DUTY RATIO MATRIX', ...Array(33).fill('')]);
+  const activeOfficeName = getActiveOfficeIdentity().officeName || '155 UASU BAF';
+  rows.push([`# ${activeOfficeName} - OFFICIAL DUTY RATIO MATRIX`, ...Array(33).fill('')]);
   rows.push([
     '"# NOTE: ""Total"" column and ""Daily Total"" / ""Daily Req"" rows are auto-calculated. Only edit flight quotas for Day 1-31."',
     ...Array(33).fill(''),
@@ -880,8 +882,9 @@ export function exportManpowerAndNominalRollExcel(
   const totalCpl = manpowerData.mechCpl + manpowerData.aviCpl + manpowerData.gcsCpl + manpowerData.adminCpl;
   const totalAll = totalSgt + totalCpl;
 
+  const identity = getActiveOfficeIdentity();
   const mpRows = [
-    ['155 UASU BAF • BAF BASE ZHR'],
+    [`${identity.officeName} • ${identity.officeBase}`],
     ['EFFECTIVE MANPOWER'],
     ['Flight', 'Sgt', 'Cpl & Below', 'Total'],
     ['Mech', manpowerData.mechSgt, manpowerData.mechCpl, manpowerData.mechSgt + manpowerData.mechCpl],
@@ -911,7 +914,7 @@ export function exportManpowerAndNominalRollExcel(
 
   // Sheet 2: Nominal Roll
   const nrRows: any[][] = [
-    ['155 UASU BAF • BAF BASE ZHR'],
+    [`${identity.officeName} • ${identity.officeBase}`],
     ['NOMINAL ROLL'],
     ['Ser No', 'Rank', 'Name', 'Trade', 'Flight', 'Disposal'],
   ];
@@ -974,7 +977,8 @@ export function exportFlightDutyScheduleExcel(
   };
 
   const formattedDate = targetDate || '';
-  rows.push([`155 UASU BAF • BAF BASE ZHR`]);
+  const identity = getActiveOfficeIdentity();
+  rows.push([`${identity.officeName} • ${identity.officeBase}`]);
   rows.push([`${flightName.toUpperCase()} DUTY SCHEDULE (SCALE 1-31)` + (formattedDate ? ` - ${formattedDate}` : '')]);
 
   const headerRowIndex = rows.length;
@@ -1262,7 +1266,7 @@ export function exportMonthlyAttendanceRegisterExcel(
   // Heading: 155 UASU, BAF (BOLD)
   // Attendance Register (underline)
   // Month: [Month]
-  rows.push(['155 UASU, BAF']);
+  rows.push([getActiveOfficeIdentity().officeName || '155 UASU, BAF']);
   rows.push(['ATTENDANCE REGISTER']);
   rows.push([`Month: ${monthName}`]);
   rows.push([]); // blank spacing row

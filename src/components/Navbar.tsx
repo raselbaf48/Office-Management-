@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Shield, Calendar, UserCheck, Layers, BarChart3, Sun, Moon, ShieldAlert, LogOut, User } from 'lucide-react';
 import { UserRole, FlightName } from '../types';
+import { getActiveOfficeIdentity } from '../firebase';
+import { Logo155UASU } from './Logo155UASU';
 
 interface NavbarProps {
   activeTab: 'dashboard' | 'nominal' | 'register' | 'analytics';
@@ -29,24 +31,40 @@ export const Navbar: React.FC<NavbarProps> = ({
   setDarkMode,
   conflictCount,
 }) => {
+  const [officeIdentity, setOfficeIdentity] = useState(() => getActiveOfficeIdentity());
+
+  useEffect(() => {
+    const sync = () => setOfficeIdentity(getActiveOfficeIdentity());
+    window.addEventListener('baf_office_config_changed', sync);
+    window.addEventListener('baf_logo_updated', sync);
+    window.addEventListener('baf_settings_updated', sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener('baf_office_config_changed', sync);
+      window.removeEventListener('baf_logo_updated', sync);
+      window.removeEventListener('baf_settings_updated', sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+
   return (
     <header className="sticky top-0 z-40 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-100 shadow-sm dark:shadow-lg transition-colors">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
           {/* Unit Branding */}
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-lg bg-emerald-600 border border-emerald-500 dark:border-emerald-400 flex items-center justify-center text-white shadow-md">
-              <Shield className="w-6 h-6 stroke-[2.2]" />
-            </div>
+            <Logo155UASU className="w-10 h-10" />
             <div>
               <div className="flex items-center space-x-2">
-                <span className="font-extrabold text-lg tracking-wider text-slate-900 dark:text-white">155 UASU BAF</span>
+                <span className="font-extrabold text-lg tracking-wider text-slate-900 dark:text-white">
+                  {officeIdentity.officeName}
+                </span>
                 <span className="px-2 py-0.5 text-[10px] uppercase font-bold tracking-widest bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 rounded-full">
-                  Office System
+                  {officeIdentity.officeBase || 'BAF BASE ZHR'}
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 hidden sm:block">
-                Bangladesh Air Force • Personnel Duty Register & Parade State
+                {officeIdentity.officeSlogan || 'Intel • Surveillance • Strike'}
               </p>
             </div>
           </div>

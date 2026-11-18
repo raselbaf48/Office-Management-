@@ -1297,15 +1297,37 @@ export async function executeFullMigrationToFirebase(dbData?: any): Promise<Fire
 
     if (typeof window !== 'undefined') {
       // App settings (Office only)
+      const isDefault = isDefault155UasuOffice();
+      const officeSuffix = !isDefault
+        ? getOfficeScopedStorageKey('__probe__').replace(/^__probe__/, '')
+        : '';
       const settingItems: AppSettingItemInput[] = [];
       for (let i = 0; i < window.localStorage.length; i++) {
-        const k = window.localStorage.key(i);
-        if (!k || k === 'baf_155_uasu_v2_db' || k === 'baf_database_v2' || k === PENDING_DELTA_QUEUE_KEY) continue;
-        if (k.includes('canteen')) continue;
-        if (k.startsWith('baf_') || k.startsWith('savedDisposalKeys') || k.startsWith('parade_historical') || k.startsWith('flg_wg_')) {
-          const v = window.localStorage.getItem(k);
+        const rawKey = window.localStorage.key(i);
+        if (!rawKey) continue;
+        if (isDefault && rawKey.includes('__office_')) continue;
+        if (!isDefault && (!officeSuffix || !rawKey.endsWith(officeSuffix))) continue;
+        const baseKey = !isDefault && officeSuffix ? rawKey.slice(0, -officeSuffix.length) : rawKey;
+        if (
+          !baseKey ||
+          baseKey === 'baf_155_uasu_v2_db' ||
+          baseKey === 'baf_database_v2' ||
+          baseKey === PENDING_DELTA_QUEUE_KEY ||
+          baseKey === 'custom_office_config' ||
+          baseKey === 'baf_custom_office_firebase_config_v1'
+        ) {
+          continue;
+        }
+        if (baseKey.includes('canteen')) continue;
+        if (
+          baseKey.startsWith('baf_') ||
+          baseKey.startsWith('savedDisposalKeys') ||
+          baseKey.startsWith('parade_historical') ||
+          baseKey.startsWith('flg_wg_')
+        ) {
+          const v = window.localStorage.getItem(baseKey);
           if (v !== null && v.length < 700000) {
-            settingItems.push({ settingKey: k, value: v });
+            settingItems.push({ settingKey: baseKey, value: v });
           }
         }
       }
@@ -1325,3 +1347,69 @@ export async function executeFullMigrationToFirebase(dbData?: any): Promise<Fire
 
   return result;
 }
+
+/**
+ * Purges all Firestore documents scoped to the active custom office prefix (`off_<CODE>__`)
+ * so a newly added or reset custom office starts 100% brand new in Firestore.
+ * Never touches 155 UASU BAF documents.
+ */
+export async function purgeActiveCustomOfficeCloudData(options?: {
+  keepUserIds?: string[];
+  onlySettingsAndLeakedUsers?: boolean;
+}): Promise<void> {
+  if (isDefault155UasuOffice()) return;
+  if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
+  const prefix = getOfficeFirestoreDocPrefix();
+  if (!prefix || !prefix.startsWith('off_')) return;
+
+  const collectionsToClean = options?.onlySettingsAndLeakedUsers
+    ? ['user_profiles', 'app_settings']
+    : ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'];
+
+  const keepSet = new Set(
+    (options?.keepUserIds || []).map((id) => sanitizeDocId(`${prefix}${id}`))
+  );
+
+  for (const colName of collectionsToClean) {
+    try {
+      const snap = await withFirestoreTimeout(
+        getDocs(collection(dbLite, colName)),
+        10000,
+        `purgeList:${colName}`
+      );
+      const docIdsToDelete: string[] = [];
+      snap.forEach((docSnap) => {
+        const docId = docSnap.id;
+        const d = docSnap.data() || {};
+        const matchesPrefix =
+          docId.startsWith(prefix) ||
+          String(d.id || '').startsWith(prefix) ||
+          String(d.settingKey || '').startsWith(prefix);
+        if (!matchesPrefix) return;
+
+        if (colName === 'user_profiles') {
+          if (keepSet.has(docId)) return;
+          if (options?.onlySettingsAndLeakedUsers) {
+            const rawId = String(d.id || docId).slice(prefix.length);
+            const rawBd = String(d.bdNo || d.userId || '').replace(/\D/g, '');
+            const isMaster = rawBd === '48456' || d.role === 'master_owner' || d.isProtected === true;
+            const isOfficeAdmin = rawId.startsWith('office-admin-');
+            if (isMaster || isOfficeAdmin) return;
+          }
+        }
+        docIdsToDelete.push(docId);
+      });
+
+      const CHUNK = 350;
+      for (let i = 0; i < docIdsToDelete.length; i += CHUNK) {
+        const slice = docIdsToDelete.slice(i, i + CHUNK);
+        const batch = writeBatch(dbLite);
+        slice.forEach((id) => batch.delete(doc(dbLite, colName, id)));
+        await withFirestoreTimeout(batch.commit(), 12000, `purgeBatch:${colName}`);
+      }
+    } catch (err) {
+      console.warn(`[FirebaseService] purgeActiveCustomOfficeCloudData warning on ${colName}:`, err);
+    }
+  }
+}
+

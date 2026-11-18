@@ -101,6 +101,22 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   onLogoutAdmin,
   onLogoutUser,
 }) => {
+  const [officeIdentity, setOfficeIdentity] = useState(() => getActiveOfficeIdentity());
+
+  useEffect(() => {
+    const syncIdentity = () => setOfficeIdentity(getActiveOfficeIdentity());
+    window.addEventListener('baf_office_config_changed', syncIdentity);
+    window.addEventListener('baf_logo_updated', syncIdentity);
+    window.addEventListener('baf_settings_updated', syncIdentity);
+    window.addEventListener('storage', syncIdentity);
+    return () => {
+      window.removeEventListener('baf_office_config_changed', syncIdentity);
+      window.removeEventListener('baf_logo_updated', syncIdentity);
+      window.removeEventListener('baf_settings_updated', syncIdentity);
+      window.removeEventListener('storage', syncIdentity);
+    };
+  }, []);
+
   // Breadcrumb / Title mapping
   const getTabTitle = (tab: SidebarTab) => {
     switch (tab) {
@@ -137,21 +153,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
       case 'conflicts':
         return { category: 'SCHEDULE MANAGEMENT', title: 'Duty Conflict Monitor & Rules' };
       default:
-        return { category: 'SYSTEM', title: 'BAF 155 UASU System' };
+        return { category: 'SYSTEM', title: `${officeIdentity.officeName} System` };
     }
   };
-
-  const [officeIdentity, setOfficeIdentity] = useState(() => getActiveOfficeIdentity());
-
-  useEffect(() => {
-    const syncIdentity = () => setOfficeIdentity(getActiveOfficeIdentity());
-    window.addEventListener('baf_office_config_changed', syncIdentity);
-    window.addEventListener('storage', syncIdentity);
-    return () => {
-      window.removeEventListener('baf_office_config_changed', syncIdentity);
-      window.removeEventListener('storage', syncIdentity);
-    };
-  }, []);
 
   const { category, title } = getTabTitle(activeTab);
 
@@ -181,6 +185,12 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                   <span>{category}</span>
                   <span>•</span>
                   <span>{officeIdentity.officeName}</span>
+                  {officeIdentity.officeBase && (
+                    <>
+                      <span className="hidden sm:inline">•</span>
+                      <span className="hidden sm:inline text-slate-500 dark:text-slate-400">{officeIdentity.officeBase}</span>
+                    </>
+                  )}
                 </div>
                 <h1 className="text-base sm:text-lg font-black text-slate-900 dark:text-white tracking-tight leading-none mt-0.5">
                   {title}

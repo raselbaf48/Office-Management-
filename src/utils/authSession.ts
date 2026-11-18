@@ -9,6 +9,7 @@ import {
   MASTER_USER_PIN,
   getOfficeScopedStorageKey,
   getOfficeFirestoreDocPrefix,
+  isDefault155UasuOffice,
 } from '../firebase';
 import { fetchUserProfilesFromFirebase, pushUserProfilesToFirebase } from '../services/firebaseFirestoreService';
 import { localDb } from '../services/localDatabase';
@@ -161,6 +162,23 @@ export const getCurrentUserSession = (): UserSession | null => {
 };
 
 export const getDetailedUsers = (nominalAirmen: Airman[] = []): DetailedUserLogin[] => {
+  const isDefault155 = isDefault155UasuOffice();
+  const effectiveAirmen: Airman[] = isDefault155
+    ? nominalAirmen
+    : (() => {
+        try {
+          return localDb.getAirmen() || [];
+        } catch {
+          return [];
+        }
+      })();
+
+  const validOfficeBdSet = new Set<string>(
+    effectiveAirmen
+      .map((a) => (a.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
   let parsed: DetailedUserLogin[] = [];
   const storageKey = getDetailedUsersStorageKey();
   try {
@@ -172,7 +190,7 @@ export const getDetailedUsers = (nominalAirmen: Airman[] = []): DetailedUserLogi
           ...u,
           status:
             u.status === 'SUSPENDED' &&
-            nominalAirmen.find(
+            effectiveAirmen.find(
               (a) => (a.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase() === (u.bdNo || '').toLowerCase()
             )?.active !== false
               ? 'ACTIVE'
@@ -186,9 +204,23 @@ export const getDetailedUsers = (nominalAirmen: Airman[] = []): DetailedUserLogi
 
   let modified = false;
 
-  // Remove legacy obsolete accounts
+  // Remove legacy obsolete accounts and any leaked 155 UASU auto-synced users in custom offices
   const beforeCount = parsed.length;
-  parsed = parsed.filter((u) => u.bdNo !== '53539919' && u.bdNo !== 'deleted_admin');
+  parsed = parsed.filter((u) => {
+    if (u.bdNo === '53539919' || u.bdNo === 'deleted_admin') return false;
+    if (!isDefault155) {
+      const cleanBd = String(u.bdNo || u.userId || '').replace(/^BD\/?/i, '').trim().toLowerCase();
+      if (isMasterProtectedUser(cleanBd, u.role, u.isProtected)) return true;
+      if (String(u.id || '').startsWith('office-admin-')) return true;
+      const isAutoSynced =
+        u.remarks === 'Auto-synced from Nominal Roll' ||
+        u.detailedBy === 'System Auto Sync';
+      if (isAutoSynced && !validOfficeBdSet.has(cleanBd)) {
+        return false;
+      }
+    }
+    return true;
+  });
   if (parsed.length !== beforeCount) {
     modified = true;
   }
@@ -220,8 +252,8 @@ export const getDetailedUsers = (nominalAirmen: Airman[] = []): DetailedUserLogi
   }
 
   // Auto-sync Nominal Roll users into User Management (excluding 48456 so 48456 stays hidden from manpower)
-  if (nominalAirmen && nominalAirmen.length > 0) {
-    nominalAirmen.forEach((a) => {
+  if (effectiveAirmen && effectiveAirmen.length > 0) {
+    effectiveAirmen.forEach((a) => {
       const cleanBd = (a.bdNo || '').replace(/^BD\/?/i, '').trim();
       if (!cleanBd || isMasterProtectedUser(cleanBd, a.role, a.isProtected)) return;
 

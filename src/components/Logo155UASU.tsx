@@ -26,9 +26,13 @@ export const Logo155UASU: React.FC<LogoProps> = ({
       setImgError(false);
     };
     window.addEventListener('baf_office_config_changed', refreshIdentity);
+    window.addEventListener('baf_logo_updated', refreshIdentity);
+    window.addEventListener('baf_settings_updated', refreshIdentity);
     window.addEventListener('storage', refreshIdentity);
     return () => {
       window.removeEventListener('baf_office_config_changed', refreshIdentity);
+      window.removeEventListener('baf_logo_updated', refreshIdentity);
+      window.removeEventListener('baf_settings_updated', refreshIdentity);
       window.removeEventListener('storage', refreshIdentity);
     };
   }, []);

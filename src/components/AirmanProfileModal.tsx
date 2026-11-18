@@ -4,6 +4,7 @@ import { Airman, DutyAssignment } from '../types';
 import { X, Shield, Phone, MapPin, Award, Calendar, FileText, User, Filter, Printer, Clock, Settings, Trash2, Check, RefreshCw, AlertCircle, ShoppingBag, CreditCard, Mail } from 'lucide-react';
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
+import { isDefault155UasuOffice } from '../firebase';
 
 const resolveImageUrl = (url?: string | null): string => {
   if (!url || typeof url !== 'string') return '';
@@ -59,6 +60,7 @@ const presetLocations = ['AIR HQ', 'BAF AKR', 'BAF BSR', 'BAF MTR', 'BAF CXB', '
 
 export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, onClose, onEditAirman, onRemoveAirman, role, initialTab = 'profile', initialCategory = 'ALL', historyOnly = false, allowEditDelete = false, variant = "nominal", canteenOnly = false }) => {
   const initialAirman = useMemo(() => {
+    if (!isDefault155UasuOffice()) return undefined;
     const cleanBd = (airman.bdNo || '').replace(/^BD\/?/i, '').trim();
     return INITIAL_AIRMEN.find((a) => (a.bdNo || '').replace(/^BD\/?/i, '').trim() === cleanBd);
   }, [airman.bdNo]);
@@ -85,7 +87,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
   const [assignments, setAssignments] = useState<DutyAssignment[]>([]);
   const [canteenTransactions, setCanteenTransactions] = useState<any[]>([]);
   const [canteenMemberData, setCanteenMemberData] = useState<any>((airman as any)?.canteenMember || null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(false);
   
   const [categoryFilter, setCategoryFilter] = useState<string>(canteenOnly ? 'ALL_CANTEEN' : initialCategory);
   
@@ -477,7 +479,6 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
 
   useEffect(() => {
     const fetchHistory = async () => {
-      setLoading(true);
       try {
         const [fromY, fromM] = fromDate.slice(0, 7).split('-').map(Number);
         const [toY, toM] = toDate.slice(0, 7).split('-').map(Number);

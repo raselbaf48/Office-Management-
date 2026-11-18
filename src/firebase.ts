@@ -41,6 +41,14 @@ export const MASTER_OWNER_CONFIG = {
 
 export const CUSTOM_OFFICE_CONFIG_KEY = 'custom_office_config';
 export const MASTER_OFFICES_CACHE_KEY = 'baf_master_registered_offices_cache';
+export const OFFICE_PROFILE_STORAGE_KEY = 'baf_office_profile_v1';
+
+export interface OfficeProfileData {
+  officeName: string;
+  officeLogo: string;
+  officeSlogan: string;
+  officeBase: string;
+}
 
 export interface OfficeFirebaseConfig {
   apiKey: string;
@@ -52,11 +60,15 @@ export interface OfficeFirebaseConfig {
   firestoreDatabaseId?: string;
   officeCode?: string;
   joinPin?: string;
+  officeSlogan?: string;
+  officeBase?: string;
 }
 
 export interface CustomOfficeConfig {
   officeName: string;
   officeLogo: string;
+  officeSlogan?: string;
+  officeBase?: string;
   officeCode?: string;
   joinPin?: string;
   firebaseConfig: OfficeFirebaseConfig;
@@ -67,6 +79,8 @@ export interface CustomOfficeConfig {
 export interface RegisteredOfficeRecord {
   officeName: string;
   officeLogo: string;
+  officeSlogan?: string;
+  officeBase?: string;
   officeCode?: string;
   joinPin?: string;
   projectId: string;
@@ -223,9 +237,20 @@ export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null
     .trim();
   const joinPin = raw.joinPin || fb.joinPin ? String(raw.joinPin || fb.joinPin).trim() : undefined;
 
+  const officeSlogan =
+    raw.officeSlogan || fb.officeSlogan
+      ? String(raw.officeSlogan || fb.officeSlogan).trim()
+      : undefined;
+  const officeBase =
+    raw.officeBase || fb.officeBase
+      ? String(raw.officeBase || fb.officeBase).trim()
+      : undefined;
+
   return {
     officeName,
     officeLogo: String(raw.officeLogo || '/155-uasu-baf-logo.png').trim() || '/155-uasu-baf-logo.png',
+    ...(officeSlogan ? { officeSlogan } : {}),
+    ...(officeBase ? { officeBase } : {}),
     officeCode,
     joinPin,
     firebaseConfig: {
@@ -240,6 +265,8 @@ export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null
         : (firebaseConfigData as any).firestoreDatabaseId,
       officeCode,
       ...(joinPin ? { joinPin } : {}),
+      ...(officeSlogan ? { officeSlogan } : {}),
+      ...(officeBase ? { officeBase } : {}),
     },
     configuredAt: raw.configuredAt || new Date().toISOString(),
     adminUserId: raw.adminUserId ? String(raw.adminUserId).trim() : undefined,
@@ -290,14 +317,19 @@ export function decodeOfficeSetupPayload(input: string): CustomOfficeConfig | nu
 }
 
 export function encodeOfficeSetupLink(config?: CustomOfficeConfig): string {
+  const activeIdentity = getActiveOfficeIdentity();
   const effectiveConfig = config || getCustomOfficeConfig() || {
-    officeName: getActiveOfficeIdentity().officeName,
-    officeLogo: getActiveOfficeIdentity().officeLogo,
+    officeName: activeIdentity.officeName,
+    officeLogo: activeIdentity.officeLogo,
+    officeSlogan: activeIdentity.officeSlogan,
+    officeBase: activeIdentity.officeBase,
     firebaseConfig,
   };
   const payload = {
     officeName: effectiveConfig.officeName,
     officeLogo: effectiveConfig.officeLogo || '/155-uasu-baf-logo.png',
+    officeSlogan: effectiveConfig.officeSlogan || activeIdentity.officeSlogan,
+    officeBase: effectiveConfig.officeBase || activeIdentity.officeBase,
     firebaseConfig: effectiveConfig.firebaseConfig,
   };
   const encoded = encodeBase64Utf8(payload);
@@ -482,13 +514,17 @@ function initDynamicOfficeFirebase(customCfg?: CustomOfficeConfig | null): void 
 
 initDynamicOfficeFirebase(activeCustomOffice);
 
-export function saveCustomOfficeConfig(config: CustomOfficeConfig): void {
+export function saveCustomOfficeConfig(
+  config: CustomOfficeConfig,
+  options?: { isBrandNew?: boolean }
+): void {
   if (typeof window !== 'undefined') {
     window.localStorage.setItem(CUSTOM_OFFICE_CONFIG_KEY, JSON.stringify(config));
   }
   initDynamicOfficeFirebase(config);
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('baf_office_config_changed', { detail: config }));
+    const payload = options?.isBrandNew ? { ...config, __isBrandNew: true } : config;
+    window.dispatchEvent(new CustomEvent('baf_office_config_changed', { detail: payload }));
   }
 }
 
@@ -502,36 +538,139 @@ export function clearCustomOfficeConfig(): void {
   }
 }
 
+export function getSavedOfficeProfileOverride(): Partial<OfficeProfileData> | null {
+  if (typeof window === 'undefined' || !window.localStorage) return null;
+  try {
+    const raw = window.localStorage.getItem(OFFICE_PROFILE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export function getActiveOfficeIdentity(): {
   officeName: string;
   officeLogo: string;
+  officeSlogan: string;
+  officeBase: string;
   officeCode: string;
   joinPin?: string;
   projectId: string;
   isCustom: boolean;
 } {
   const custom = getCustomOfficeConfig();
+  const profileOverride = getSavedOfficeProfileOverride();
+
   if (custom) {
     const code =
       custom.officeCode ||
       custom.firebaseConfig?.officeCode ||
       generateOfficeCodeFromName(custom.officeName || 'Office');
+    const resolvedName =
+      (profileOverride?.officeName && String(profileOverride.officeName).trim()) ||
+      custom.officeName ||
+      'Office Management Portal';
+    const resolvedLogo =
+      (profileOverride?.officeLogo && String(profileOverride.officeLogo).trim()) ||
+      custom.officeLogo ||
+      '/155-uasu-baf-logo.png';
+    const resolvedSlogan =
+      (profileOverride?.officeSlogan && String(profileOverride.officeSlogan).trim()) ||
+      custom.officeSlogan ||
+      custom.firebaseConfig?.officeSlogan ||
+      'Intel • Surveillance • Strike';
+    const resolvedBase =
+      (profileOverride?.officeBase && String(profileOverride.officeBase).trim()) ||
+      custom.officeBase ||
+      custom.firebaseConfig?.officeBase ||
+      'BAF BASE ZHR';
     return {
-      officeName: custom.officeName || 'Office Management Portal',
-      officeLogo: custom.officeLogo || '/155-uasu-baf-logo.png',
+      officeName: resolvedName,
+      officeLogo: resolvedLogo,
+      officeSlogan: resolvedSlogan,
+      officeBase: resolvedBase,
       officeCode: code,
       joinPin: custom.joinPin || custom.firebaseConfig?.joinPin,
       projectId: custom.firebaseConfig.projectId,
       isCustom: true,
     };
   }
+
   return {
-    officeName: '155 UASU BAF',
-    officeLogo: '/155-uasu-baf-logo.png',
+    officeName:
+      (profileOverride?.officeName && String(profileOverride.officeName).trim()) ||
+      '155 UASU BAF',
+    officeLogo:
+      (profileOverride?.officeLogo && String(profileOverride.officeLogo).trim()) ||
+      '/155-uasu-baf-logo.png',
+    officeSlogan:
+      (profileOverride?.officeSlogan && String(profileOverride.officeSlogan).trim()) ||
+      'Intel • Surveillance • Strike',
+    officeBase:
+      (profileOverride?.officeBase && String(profileOverride.officeBase).trim()) ||
+      'BAF BASE ZHR',
     officeCode: '155-UASU',
     projectId: firebaseConfigData.projectId || 'default',
     isCustom: false,
   };
+}
+
+export function updateActiveOfficeProfile(profile: Partial<OfficeProfileData>): OfficeProfileData {
+  const current = getActiveOfficeIdentity();
+  const nextProfile: OfficeProfileData = {
+    officeName: String(profile.officeName ?? current.officeName ?? '155 UASU BAF').trim() || '155 UASU BAF',
+    officeLogo: String(profile.officeLogo ?? current.officeLogo ?? '/155-uasu-baf-logo.png').trim() || '/155-uasu-baf-logo.png',
+    officeSlogan: String(profile.officeSlogan ?? current.officeSlogan ?? 'Intel • Surveillance • Strike').trim() || 'Intel • Surveillance • Strike',
+    officeBase: String(profile.officeBase ?? current.officeBase ?? 'BAF BASE ZHR').trim() || 'BAF BASE ZHR',
+  };
+
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.setItem(OFFICE_PROFILE_STORAGE_KEY, JSON.stringify(nextProfile));
+      window.localStorage.setItem('baf_custom_unit_logo', nextProfile.officeLogo);
+    } catch {}
+
+    const custom = getCustomOfficeConfig();
+    if (custom) {
+      const updatedCustom: CustomOfficeConfig = {
+        ...custom,
+        officeName: nextProfile.officeName,
+        officeLogo: nextProfile.officeLogo,
+        officeSlogan: nextProfile.officeSlogan,
+        officeBase: nextProfile.officeBase,
+        firebaseConfig: {
+          ...custom.firebaseConfig,
+          officeSlogan: nextProfile.officeSlogan,
+          officeBase: nextProfile.officeBase,
+        },
+      };
+      try {
+        window.localStorage.setItem(CUSTOM_OFFICE_CONFIG_KEY, JSON.stringify(updatedCustom));
+      } catch {}
+      registerOfficeInMasterTelemetry({
+        officeName: updatedCustom.officeName,
+        officeLogo: updatedCustom.officeLogo,
+        officeSlogan: updatedCustom.officeSlogan,
+        officeBase: updatedCustom.officeBase,
+        officeCode: updatedCustom.officeCode,
+        joinPin: updatedCustom.joinPin,
+        firebaseConfig: updatedCustom.firebaseConfig,
+      }).catch(() => {});
+    }
+
+    try {
+      document.title = `${nextProfile.officeName} | ${nextProfile.officeBase}`;
+    } catch {}
+
+    window.dispatchEvent(new CustomEvent('baf_office_config_changed', { detail: nextProfile }));
+    window.dispatchEvent(new Event('baf_logo_updated'));
+    window.dispatchEvent(new CustomEvent('baf_settings_updated', { detail: { key: OFFICE_PROFILE_STORAGE_KEY } }));
+  }
+
+  return nextProfile;
 }
 
 export function getActiveOfficeCode(): string {
@@ -540,13 +679,16 @@ export function getActiveOfficeCode(): string {
 }
 
 export function isDefault155UasuOffice(): boolean {
-  const identity = getActiveOfficeIdentity();
-  const code = String(identity.officeCode || '').toUpperCase().trim();
-  const name = String(identity.officeName || '').toUpperCase().trim();
-  return (code === '155-UASU' || code === '155UASU') && name.includes('155 UASU');
+  const custom = getCustomOfficeConfig();
+  if (!custom) return true;
+  const code = String(custom.officeCode || custom.firebaseConfig?.officeCode || '').toUpperCase().trim();
+  return code === '155-UASU' || code === '155UASU';
 }
 
 export function getOfficeScopedStorageKey(baseKey: string): string {
+  if (!baseKey || baseKey.includes('__office_')) {
+    return baseKey;
+  }
   if (isDefault155UasuOffice()) {
     return baseKey;
   }
@@ -560,6 +702,28 @@ export function getOfficeFirestoreDocPrefix(): string {
   }
   const safeCode = getActiveOfficeCode().replace(/[^A-Z0-9_-]/g, '_');
   return `off_${safeCode}__`;
+}
+
+export function purgeOfficeLocalStorageKeys(targetOfficeCode?: string): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  const code = String(targetOfficeCode || getActiveOfficeCode() || '')
+    .toUpperCase()
+    .trim();
+  if (!code || code === '155-UASU' || code === '155UASU') return;
+  const safeCode = code.replace(/[^A-Z0-9_-]/g, '_');
+  const suffix = `__office_${safeCode}`;
+  const keysToRemove: string[] = [];
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const k = window.localStorage.key(i);
+    if (k && k.endsWith(suffix)) {
+      keysToRemove.push(k);
+    }
+  }
+  keysToRemove.forEach((k) => {
+    try {
+      window.localStorage.removeItem(k);
+    } catch {}
+  });
 }
 
 
@@ -646,6 +810,8 @@ export async function registerOfficeInMasterTelemetry(
   params: {
     officeName: string;
     officeLogo: string;
+    officeSlogan?: string;
+    officeBase?: string;
     officeCode?: string;
     joinPin?: string;
     firebaseConfig: OfficeFirebaseConfig;
@@ -669,6 +835,14 @@ export async function registerOfficeInMasterTelemetry(
     params.joinPin || params.firebaseConfig?.joinPin
       ? String(params.joinPin || params.firebaseConfig?.joinPin).trim()
       : undefined;
+  const officeSlogan =
+    params.officeSlogan || params.firebaseConfig?.officeSlogan
+      ? String(params.officeSlogan || params.firebaseConfig?.officeSlogan).trim()
+      : undefined;
+  const officeBase =
+    params.officeBase || params.firebaseConfig?.officeBase
+      ? String(params.officeBase || params.firebaseConfig?.officeBase).trim()
+      : undefined;
 
   // Use a unique registry key per officeCode so multiple offices can be registered cleanly
   const registryKey = officeCode
@@ -684,6 +858,8 @@ export async function registerOfficeInMasterTelemetry(
   const record: RegisteredOfficeRecord = {
     officeName: String(params.officeName || 'Office Unit').slice(0, 200),
     officeLogo: String(params.officeLogo || '/155-uasu-baf-logo.png').slice(0, 500000),
+    ...(officeSlogan ? { officeSlogan } : {}),
+    ...(officeBase ? { officeBase } : {}),
     officeCode,
     ...(joinPin ? { joinPin } : {}),
     projectId: baseProjectId.slice(0, 128),
@@ -696,6 +872,8 @@ export async function registerOfficeInMasterTelemetry(
       appId: String(params.firebaseConfig.appId || ''),
       officeCode,
       ...(joinPin ? { joinPin } : {}),
+      ...(officeSlogan ? { officeSlogan } : {}),
+      ...(officeBase ? { officeBase } : {}),
       ...(params.firebaseConfig.firestoreDatabaseId
         ? { firestoreDatabaseId: String(params.firebaseConfig.firestoreDatabaseId) }
         : {}),
