@@ -187,21 +187,57 @@ export interface RegisteredOfficeRecord {
 export type CustomFirebaseConfig = OfficeFirebaseConfig;
 export type RegisteredOfficeTelemetry = RegisteredOfficeRecord;
 
+export const DEFAULT_APP_LOGO = '/office-management-logo.jpg';
+export const DEFAULT_APP_TITLE = 'Office Management Application';
+
 export function syncBrowserTabIdentity(
   officeName?: string,
   officeLogo?: string,
-  officeBase?: string
+  _officeBase?: string
 ): void {
   if (typeof document === 'undefined') return;
   try {
-    const identity = getActiveOfficeIdentity();
-    const cleanName = String(officeName ?? identity.officeName ?? 'Office Management').trim() || 'Office Management';
-    const cleanBase = String(officeBase ?? identity.officeBase ?? '').trim();
-    const cleanLogo = String(officeLogo ?? identity.officeLogo ?? '/155-uasu-baf-logo.png').trim() || '/155-uasu-baf-logo.png';
+    const hasActiveSession =
+      typeof window !== 'undefined' &&
+      Boolean(window.sessionStorage?.getItem('baf_user_session'));
 
-    document.title = cleanBase && cleanName !== 'Office Management'
-      ? `${cleanName} | ${cleanBase}`
-      : `${cleanName} | Office Management System`;
+    // When no office is logged in, always display the default Office Management Application title & logo in the address bar
+    if (!hasActiveSession) {
+      document.title = DEFAULT_APP_TITLE;
+      const iconSelectors = 'link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]';
+      const existingIcons = document.head.querySelectorAll<HTMLLinkElement>(iconSelectors);
+      if (existingIcons.length > 0) {
+        existingIcons.forEach((linkEl) => {
+          linkEl.href = DEFAULT_APP_LOGO;
+        });
+      } else {
+        const newIcon = document.createElement('link');
+        newIcon.rel = 'icon';
+        newIcon.href = DEFAULT_APP_LOGO;
+        document.head.appendChild(newIcon);
+      }
+      return;
+    }
+
+    const identity = getActiveOfficeIdentity();
+    const rawName = String(officeName ?? identity.officeName ?? '').trim();
+    const isGenericName =
+      !rawName ||
+      rawName === 'Office Management' ||
+      rawName === 'Office Management Application' ||
+      rawName === 'Office Management System';
+
+    const cleanName = isGenericName ? String(identity.officeName || '155 UASU BAF').trim() : rawName;
+    const cleanLogo =
+      String(officeLogo || identity.officeLogo || '/155-uasu-baf-logo.png').trim() ||
+      '/155-uasu-baf-logo.png';
+
+    document.title =
+      cleanName &&
+      cleanName !== 'Office Management' &&
+      cleanName !== 'Office Management Application'
+        ? `${cleanName} | ${DEFAULT_APP_TITLE}`
+        : DEFAULT_APP_TITLE;
 
     const iconSelectors = 'link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]';
     const existingIcons = document.head.querySelectorAll<HTMLLinkElement>(iconSelectors);
@@ -1042,22 +1078,30 @@ export async function registerOfficeInMasterTelemetry(
   cache[registryKey] = record;
   saveLocalMasterOfficesCache(cache);
 
-  // Store only schema-validated fields in Firestore registered_offices document
-  if (masterDbInstance) {
-    try {
-      const safeDocId = registryKey.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120) || 'default_office';
-      const firestorePayload = {
-        officeName: record.officeName,
-        officeLogo: record.officeLogo,
-        projectId: record.projectId,
-        firebaseConfig: record.firebaseConfig,
-        totalUsers: record.totalUsers,
-        createdAt: record.createdAt,
-        lastActive: record.lastActive,
-      };
-      await setDoc(doc(masterDbInstance, 'registered_offices', safeDocId), firestorePayload, { merge: true });
-    } catch {
-      // Silently ignore telemetry errors if masterDb rules or network block anonymous telemetry
+  // Store only schema-validated fields in Firestore registered_offices document (throttled to avoid redundant writes)
+  if (masterDbInstance && !isFirestoreQuotaExceeded()) {
+    const prevSame =
+      existing &&
+      existing.officeName === record.officeName &&
+      existing.officeLogo === record.officeLogo &&
+      existing.projectId === record.projectId &&
+      existing.totalUsers === record.totalUsers;
+    if (!prevSame) {
+      try {
+        const safeDocId = registryKey.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120) || 'default_office';
+        const firestorePayload = {
+          officeName: record.officeName,
+          officeLogo: record.officeLogo,
+          projectId: record.projectId,
+          firebaseConfig: record.firebaseConfig,
+          totalUsers: record.totalUsers,
+          createdAt: record.createdAt,
+          lastActive: record.lastActive,
+        };
+        await setDoc(doc(masterDbInstance, 'registered_offices', safeDocId), firestorePayload, { merge: true });
+      } catch (err) {
+        if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, (err as any)?.message);
+      }
     }
   }
 }
@@ -1123,37 +1167,55 @@ export async function saveMasterCredentials(
   return creds;
 }
 
-export async function syncMasterCredentialsFromCloud(): Promise<MasterCredentials> {
+let lastMasterCredsSyncAt = 0;
+let inFlightMasterCredsPromise: Promise<MasterCredentials> | null = null;
+const MASTER_READ_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown
+
+export async function syncMasterCredentialsFromCloud(force = false): Promise<MasterCredentials> {
   const local = getMasterCredentials();
-  if (!masterDbInstance) return local;
-  try {
-    const snap = await getDoc(doc(masterDbInstance, 'app_settings', MASTER_CREDENTIALS_STORAGE_KEY));
-    if (snap.exists()) {
-      const data = snap.data();
-      const rawVal = data?.value;
-      if (rawVal) {
-        const parsed = typeof rawVal === 'string' ? JSON.parse(rawVal) : rawVal;
-        if (parsed && parsed.masterUserId && parsed.masterPin) {
-          const cloudTime = new Date(parsed.updatedAt || 0).getTime();
-          const localTime = new Date(local.updatedAt || 0).getTime();
-          if (cloudTime >= localTime) {
-            const next: MasterCredentials = {
-              masterUserId: String(parsed.masterUserId).trim(),
-              masterPin: String(parsed.masterPin).trim(),
-              isCustomPin: Boolean(parsed.isCustomPin ?? true),
-              updatedAt: parsed.updatedAt || new Date().toISOString(),
-            };
-            setRawLocalStorageItem(MASTER_CREDENTIALS_STORAGE_KEY, JSON.stringify(next));
-            if (typeof window !== 'undefined') {
-              window.dispatchEvent(new CustomEvent('baf_master_credentials_updated', { detail: next }));
+  if (!masterDbInstance || isFirestoreQuotaExceeded()) return local;
+  if (!force && Date.now() - lastMasterCredsSyncAt < MASTER_READ_COOLDOWN_MS) {
+    return local;
+  }
+  if (inFlightMasterCredsPromise) return inFlightMasterCredsPromise;
+
+  inFlightMasterCredsPromise = (async () => {
+    try {
+      lastMasterCredsSyncAt = Date.now();
+      const snap = await getDoc(doc(masterDbInstance!, 'app_settings', MASTER_CREDENTIALS_STORAGE_KEY));
+      if (snap.exists()) {
+        const data = snap.data();
+        const rawVal = data?.value;
+        if (rawVal) {
+          const parsed = typeof rawVal === 'string' ? JSON.parse(rawVal) : rawVal;
+          if (parsed && parsed.masterUserId && parsed.masterPin) {
+            const cloudTime = new Date(parsed.updatedAt || 0).getTime();
+            const localTime = new Date(local.updatedAt || 0).getTime();
+            if (cloudTime >= localTime) {
+              const next: MasterCredentials = {
+                masterUserId: String(parsed.masterUserId).trim(),
+                masterPin: String(parsed.masterPin).trim(),
+                isCustomPin: Boolean(parsed.isCustomPin ?? true),
+                updatedAt: parsed.updatedAt || new Date().toISOString(),
+              };
+              setRawLocalStorageItem(MASTER_CREDENTIALS_STORAGE_KEY, JSON.stringify(next));
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('baf_master_credentials_updated', { detail: next }));
+              }
+              return next;
             }
-            return next;
           }
         }
       }
+    } catch (err) {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, (err as any)?.message);
+    } finally {
+      inFlightMasterCredsPromise = null;
     }
-  } catch {}
-  return local;
+    return local;
+  })();
+
+  return inFlightMasterCredsPromise;
 }
 
 export function getRemovedOfficeCodes(): string[] {
@@ -1682,87 +1744,111 @@ export function getRegisteredOfficesLocal(): RegisteredOfficeRecord[] {
   );
 }
 
-export async function fetchRegisteredOfficesFromMaster(): Promise<RegisteredOfficeRecord[]> {
-  const cache = getLocalMasterOfficesCache();
-  let removedCodes = getRemovedOfficeCodes();
-  const mergedMap = new Map<string, RegisteredOfficeRecord>();
+let lastRegisteredOfficesFetchAt = 0;
+let inFlightRegisteredOfficesPromise: Promise<RegisteredOfficeRecord[]> | null = null;
 
-  // Seed from local immediately
-  getRegisteredOfficesLocal().forEach((off) => {
-    const code = String(off.officeCode || '155-UASU').toUpperCase().trim();
-    mergedMap.set(code, off);
-  });
+export async function fetchRegisteredOfficesFromMaster(force = false): Promise<RegisteredOfficeRecord[]> {
+  if (!masterDbInstance || isFirestoreQuotaExceeded()) {
+    return getRegisteredOfficesLocal();
+  }
+  if (!force && Date.now() - lastRegisteredOfficesFetchAt < MASTER_READ_COOLDOWN_MS) {
+    return getRegisteredOfficesLocal();
+  }
+  if (inFlightRegisteredOfficesPromise) {
+    return inFlightRegisteredOfficesPromise;
+  }
 
-  if (masterDbInstance) {
+  inFlightRegisteredOfficesPromise = (async () => {
     try {
-      const remSnap = await getDoc(doc(masterDbInstance, 'app_settings', REMOVED_OFFICES_STORAGE_KEY));
-      if (remSnap.exists()) {
-        const d = remSnap.data();
-        if (d?.value) {
-          const parsedRem = typeof d.value === 'string' ? JSON.parse(d.value) : d.value;
-          if (Array.isArray(parsedRem)) {
-            removedCodes = Array.from(
-              new Set([...removedCodes, ...parsedRem.map((c: any) => String(c || '').toUpperCase().trim())])
-            );
-            saveRemovedOfficeCodes(removedCodes, false);
-            removedCodes.forEach((rc) => mergedMap.delete(rc));
+      lastRegisteredOfficesFetchAt = Date.now();
+      const cache = getLocalMasterOfficesCache();
+      let removedCodes = getRemovedOfficeCodes();
+      const mergedMap = new Map<string, RegisteredOfficeRecord>();
+
+      // Seed from local immediately
+      getRegisteredOfficesLocal().forEach((off) => {
+        const code = String(off.officeCode || '155-UASU').toUpperCase().trim();
+        mergedMap.set(code, off);
+      });
+
+      try {
+        const remSnap = await getDoc(doc(masterDbInstance!, 'app_settings', REMOVED_OFFICES_STORAGE_KEY));
+        if (remSnap.exists()) {
+          const d = remSnap.data();
+          if (d?.value) {
+            const parsedRem = typeof d.value === 'string' ? JSON.parse(d.value) : d.value;
+            if (Array.isArray(parsedRem)) {
+              removedCodes = Array.from(
+                new Set([...removedCodes, ...parsedRem.map((c: any) => String(c || '').toUpperCase().trim())])
+              );
+              saveRemovedOfficeCodes(removedCodes, false);
+              removedCodes.forEach((rc) => mergedMap.delete(rc));
+            }
           }
         }
-      }
-    } catch {}
-  }
-
-  if (masterDbInstance) {
-    try {
-      const snap = await getDocs(collection(masterDbInstance, 'registered_offices'));
-      snap.forEach((docSnap) => {
-        const d = docSnap.data() as RegisteredOfficeRecord;
-        if (d && d.officeName) {
-          const rawCode = (
-            d.officeCode ||
-            d.firebaseConfig?.officeCode ||
-            generateOfficeCodeFromName(d.officeName)
-          )
-            .toUpperCase()
-            .trim();
-          const code =
-            rawCode === '155-UASU-BAF' || d.officeName.trim().toUpperCase() === '155 UASU BAF'
-              ? '155-UASU'
-              : rawCode;
-          if (removedCodes.includes(code)) return;
-          const prev = mergedMap.get(code);
-          const enriched: RegisteredOfficeRecord = {
-            ...prev,
-            ...d,
-            officeCode: code,
-            status: d.status || prev?.status || 'ACTIVE',
-            joinPin: d.joinPin || d.firebaseConfig?.joinPin || prev?.joinPin,
-            totalUsers: getRealtimeOfficeUserCount(code, d.totalUsers),
-          };
-          mergedMap.set(code, enriched);
-          cache[`${d.projectId}__${code}`] = enriched;
+      } catch (err) {
+        if (isQuotaExceededError(err)) {
+          setFirestoreQuotaExceeded(true, (err as any)?.message);
+          return getRegisteredOfficesLocal();
         }
-      });
-      saveLocalMasterOfficesCache(cache);
-    } catch {
-      // Fallback to local cache if masterDb read fails
+      }
+
+      try {
+        const snap = await getDocs(collection(masterDbInstance!, 'registered_offices'));
+        snap.forEach((docSnap) => {
+          const d = docSnap.data() as RegisteredOfficeRecord;
+          if (d && d.officeName) {
+            const rawCode = (
+              d.officeCode ||
+              d.firebaseConfig?.officeCode ||
+              generateOfficeCodeFromName(d.officeName)
+            )
+              .toUpperCase()
+              .trim();
+            const code =
+              rawCode === '155-UASU-BAF' || d.officeName.trim().toUpperCase() === '155 UASU BAF'
+                ? '155-UASU'
+                : rawCode;
+            if (removedCodes.includes(code)) return;
+            const prev = mergedMap.get(code);
+            const enriched: RegisteredOfficeRecord = {
+              ...prev,
+              ...d,
+              officeCode: code,
+              status: d.status || prev?.status || 'ACTIVE',
+              joinPin: d.joinPin || d.firebaseConfig?.joinPin || prev?.joinPin,
+              totalUsers: getRealtimeOfficeUserCount(code, d.totalUsers),
+            };
+            mergedMap.set(code, enriched);
+            cache[`${d.projectId}__${code}`] = enriched;
+          }
+        });
+        saveLocalMasterOfficesCache(cache);
+      } catch (err) {
+        if (isQuotaExceededError(err)) {
+          setFirestoreQuotaExceeded(true, (err as any)?.message);
+        }
+      }
+
+      const finalOffices = Array.from(mergedMap.values())
+        .filter((off) => !removedCodes.includes(String(off.officeCode || '').toUpperCase().trim()))
+        .map((off) => {
+          const code = String(off.officeCode || '155-UASU').toUpperCase().trim();
+          return {
+            ...off,
+            totalUsers: getRealtimeOfficeUserCount(code, off.totalUsers),
+          };
+        });
+
+      return finalOffices.sort(
+        (a, b) => new Date(b.lastActive || 0).getTime() - new Date(a.lastActive || 0).getTime()
+      );
+    } finally {
+      inFlightRegisteredOfficesPromise = null;
     }
-  }
+  })();
 
-  // Final pass: ensure every office's totalUsers is strictly real-time Active Users
-  const finalOffices = Array.from(mergedMap.values())
-    .filter((off) => !removedCodes.includes(String(off.officeCode || '').toUpperCase().trim()))
-    .map((off) => {
-      const code = String(off.officeCode || '155-UASU').toUpperCase().trim();
-      return {
-        ...off,
-        totalUsers: getRealtimeOfficeUserCount(code, off.totalUsers),
-      };
-    });
-
-  return finalOffices.sort(
-    (a, b) => new Date(b.lastActive || 0).getTime() - new Date(a.lastActive || 0).getTime()
-  );
+  return inFlightRegisteredOfficesPromise;
 }
 
 // ============================================================================
@@ -1780,25 +1866,49 @@ export function getGlobalUserOfficeMap(): Record<string, GlobalUserOfficeEntry> 
   }
 }
 
+let lastSavedGlobalMapHash = '';
+
+function computeGlobalMapContentHash(map: Record<string, GlobalUserOfficeEntry>): string {
+  try {
+    const keys = Object.keys(map).sort();
+    return keys
+      .map((k) => {
+        const e = map[k];
+        if (!e) return '';
+        return `${e.bdNo}|${e.userName}|${e.rank}|${e.flightName || ''}|${e.trade || ''}|${e.role || ''}|${e.pin || ''}|${e.officeCode}|${e.officeName}|${Boolean(e.isPostedOut)}|${Boolean(e.active)}`;
+      })
+      .join('~');
+  } catch {
+    return '';
+  }
+}
+
 export function saveGlobalUserOfficeMap(
   map: Record<string, GlobalUserOfficeEntry>,
   syncToCloud: boolean = true
 ): void {
   if (typeof window === 'undefined') return;
+  const serialized = JSON.stringify(map);
+  const newHash = computeGlobalMapContentHash(map);
+  const isUnchanged = Boolean(newHash && newHash === lastSavedGlobalMapHash);
+  lastSavedGlobalMapHash = newHash;
+
   try {
-    setRawLocalStorageItem(GLOBAL_USER_OFFICE_MAP_KEY, JSON.stringify(map));
+    setRawLocalStorageItem(GLOBAL_USER_OFFICE_MAP_KEY, serialized);
   } catch {}
 
-  if (syncToCloud && masterDbInstance) {
+  if (syncToCloud && !isUnchanged && masterDbInstance && !isFirestoreQuotaExceeded()) {
     setDoc(
       doc(masterDbInstance, 'app_settings', GLOBAL_USER_OFFICE_MAP_KEY),
       {
         key: GLOBAL_USER_OFFICE_MAP_KEY,
-        value: JSON.stringify(map),
+        value: serialized,
         updated_at: new Date().toISOString(),
       },
       { merge: true }
-    ).catch(() => {});
+    ).catch((err) => {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, err?.message);
+    });
   }
 }
 
@@ -1862,6 +1972,9 @@ export function registerUsersInGlobalOfficeDirectory(
       : undefined);
 
   const map = getGlobalUserOfficeMap();
+  if (!lastSavedGlobalMapHash) {
+    lastSavedGlobalMapHash = computeGlobalMapContentHash(map);
+  }
   const nowIso = new Date().toISOString();
   let changed = false;
 
@@ -1876,28 +1989,47 @@ export function registerUsersInGlobalOfficeDirectory(
     const resolvedPin = String(u.pin || u.password || existing?.pin || cleanBd).trim();
     const resolvedName = String(u.fullName || u.name || existing?.userName || 'Airman').trim();
     const resolvedRank = String(u.rank || existing?.rank || 'LAC').trim();
+    const resolvedFlight = u.flightName !== undefined ? u.flightName : (existing?.flightName || (isDefault155 ? 'Admin' : ''));
+    const resolvedTrade = u.trade || existing?.trade || 'General';
+    const resolvedRole = u.role || existing?.role || 'USER';
     const isPostedOut = isAirmanPostedOut(u);
 
-    map[cleanBd] = {
-      bdNo: cleanBd,
-      userName: resolvedName,
-      rank: resolvedRank,
-      flightName: u.flightName !== undefined ? u.flightName : (existing?.flightName || (isDefault155 ? 'Admin' : '')),
-      trade: u.trade || existing?.trade || 'General',
-      role: u.role || existing?.role || 'USER',
-      pin: resolvedPin,
-      officeCode,
-      officeName,
-      officeLogo,
-      officeSlogan,
-      officeBase,
-      isDefault155,
-      isPostedOut,
-      active: !isPostedOut,
-      ...(resolvedConfig ? { officeConfig: resolvedConfig } : {}),
-      updatedAt: nowIso,
-    };
-    changed = true;
+    const isSame =
+      existing &&
+      existing.userName === resolvedName &&
+      existing.rank === resolvedRank &&
+      (existing.flightName || '') === (resolvedFlight || '') &&
+      (existing.trade || 'General') === resolvedTrade &&
+      (existing.role || 'USER') === resolvedRole &&
+      existing.pin === resolvedPin &&
+      existing.officeCode === officeCode &&
+      existing.officeName === officeName &&
+      existing.officeLogo === officeLogo &&
+      Boolean(existing.isPostedOut) === Boolean(isPostedOut) &&
+      Boolean(existing.active) === Boolean(!isPostedOut);
+
+    if (!isSame) {
+      map[cleanBd] = {
+        bdNo: cleanBd,
+        userName: resolvedName,
+        rank: resolvedRank,
+        flightName: resolvedFlight,
+        trade: resolvedTrade,
+        role: resolvedRole,
+        pin: resolvedPin,
+        officeCode,
+        officeName,
+        officeLogo,
+        officeSlogan,
+        officeBase,
+        isDefault155,
+        isPostedOut,
+        active: !isPostedOut,
+        ...(resolvedConfig ? { officeConfig: resolvedConfig } : {}),
+        updatedAt: nowIso,
+      };
+      changed = true;
+    }
   });
 
   if (changed) {
@@ -2435,131 +2567,150 @@ export function activateMatchedOfficeForUser(match: GlobalUserOfficeEntry): bool
   return switched;
 }
 
-export async function syncGlobalUserOfficeMapFromCloud(): Promise<Record<string, GlobalUserOfficeEntry>> {
+let lastGlobalUserMapSyncAt = 0;
+let inFlightGlobalUserMapPromise: Promise<Record<string, GlobalUserOfficeEntry>> | null = null;
+
+export async function syncGlobalUserOfficeMapFromCloud(force: boolean = false): Promise<Record<string, GlobalUserOfficeEntry>> {
   const localMap = getGlobalUserOfficeMap();
-  if (!masterDbInstance) return localMap;
+  if (!masterDbInstance || isFirestoreQuotaExceeded()) return localMap;
 
-  try {
-    // 1. Fetch registered_offices so we have office metadata
-    const registeredOffices = await fetchRegisteredOfficesFromMaster().catch(() => []);
-    const officeByCode = new Map<string, RegisteredOfficeRecord>();
-    registeredOffices.forEach((o) => {
-      const c = String(o.officeCode || o.firebaseConfig?.officeCode || generateOfficeCodeFromName(o.officeName))
-        .toUpperCase()
-        .trim();
-      officeByCode.set(c, o);
-    });
+  const now = Date.now();
+  if (!force && now - lastGlobalUserMapSyncAt < MASTER_READ_COOLDOWN_MS && Object.keys(localMap).length > 0) {
+    return localMap;
+  }
+  if (inFlightGlobalUserMapPromise) return inFlightGlobalUserMapPromise;
 
-    // 2. Fetch app_settings/baf_global_user_office_map_v1
-    const snap = await getDoc(doc(masterDbInstance, 'app_settings', GLOBAL_USER_OFFICE_MAP_KEY));
-    if (snap.exists()) {
-      const data = snap.data();
-      if (data?.value) {
-        const cloudMap = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
-        if (cloudMap && typeof cloudMap === 'object') {
-          Object.entries(cloudMap).forEach(([bdKey, entry]: [string, any]) => {
-            if (entry && entry.bdNo) {
-              localMap[bdKey] = {
-                ...entry,
-                ...(localMap[bdKey] &&
-                new Date(localMap[bdKey].updatedAt || 0).getTime() >
-                  new Date(entry.updatedAt || 0).getTime()
-                  ? localMap[bdKey]
-                  : {}),
+  inFlightGlobalUserMapPromise = (async () => {
+    try {
+      lastGlobalUserMapSyncAt = Date.now();
+      // 1. Fetch registered_offices (uses 5-min cooldown internally)
+      const registeredOffices = await fetchRegisteredOfficesFromMaster(force).catch(() => []);
+      const officeByCode = new Map<string, RegisteredOfficeRecord>();
+      registeredOffices.forEach((o) => {
+        const c = String(o.officeCode || o.firebaseConfig?.officeCode || generateOfficeCodeFromName(o.officeName))
+          .toUpperCase()
+          .trim();
+        officeByCode.set(c, o);
+      });
+
+      // 2. Fetch single document app_settings/baf_global_user_office_map_v1 (1 read instead of N user_profiles reads)
+      let hasCloudGlobalMap = false;
+      const snap = await getDoc(doc(masterDbInstance!, 'app_settings', GLOBAL_USER_OFFICE_MAP_KEY));
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data?.value) {
+          const cloudMap = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+          if (cloudMap && typeof cloudMap === 'object' && Object.keys(cloudMap).length > 0) {
+            hasCloudGlobalMap = true;
+            Object.entries(cloudMap).forEach(([bdKey, entry]: [string, any]) => {
+              if (entry && entry.bdNo) {
+                localMap[bdKey] = {
+                  ...entry,
+                  ...(localMap[bdKey] &&
+                  new Date(localMap[bdKey].updatedAt || 0).getTime() >
+                    new Date(entry.updatedAt || 0).getTime()
+                    ? localMap[bdKey]
+                    : {}),
+                };
+              }
+            });
+          }
+        }
+      }
+
+      // 3. Only scan user_profiles collection if forced OR if global map doc was empty/missing
+      if (force || !hasCloudGlobalMap) {
+        const usersSnap = await getDocs(collection(masterDbInstance!, 'user_profiles')).catch(() => null);
+        if (usersSnap) {
+          usersSnap.forEach((docSnap) => {
+            const docId = docSnap.id;
+            const d = docSnap.data() as any;
+            if (!d) return;
+            const cleanBd = String(d.bdNo || d.user_id || '')
+              .replace(/^BD\/?/i, '')
+              .replace(/[^0-9]/g, '')
+              .trim();
+            if (!cleanBd || cleanBd === MASTER_USER_ID || cleanBd === '53539919') return;
+
+            if (docId.startsWith('off_') && docId.includes('__')) {
+              const safeCode = docId.slice(4, docId.indexOf('__')).toUpperCase().trim();
+              const matchedOffice =
+                officeByCode.get(safeCode) ||
+                Array.from(officeByCode.values()).find(
+                  (r) =>
+                    String(r.officeCode || '')
+                      .toUpperCase()
+                      .replace(/[^A-Z0-9_-]/g, '_') === safeCode
+                );
+              const officeCode = matchedOffice?.officeCode || safeCode;
+              const officeName = matchedOffice?.officeName || safeCode.replace(/_/g, ' ');
+              const officeLogo = matchedOffice?.officeLogo || '/155-uasu-baf-logo.png';
+              const officeSlogan =
+                matchedOffice?.officeSlogan ||
+                matchedOffice?.firebaseConfig?.officeSlogan ||
+                'Intel • Surveillance • Strike';
+              const officeBase =
+                matchedOffice?.officeBase ||
+                matchedOffice?.firebaseConfig?.officeBase ||
+                'BAF BASE ZHR';
+              const fbConfig =
+                matchedOffice?.firebaseConfig || buildAutoCloudFirebaseConfig(officeName, officeCode);
+
+              localMap[cleanBd] = {
+                bdNo: cleanBd,
+                userName: d.name || 'Airman',
+                rank: d.rank || 'LAC',
+                flightName: d.flightName || 'Admin',
+                trade: d.trade || 'General',
+                role: d.role || 'USER',
+                pin: String(d.password || d.pin || cleanBd),
+                officeCode,
+                officeName,
+                officeLogo,
+                officeSlogan,
+                officeBase,
+                isDefault155: false,
+                officeConfig: {
+                  officeName,
+                  officeLogo,
+                  officeSlogan,
+                  officeBase,
+                  officeCode,
+                  firebaseConfig: fbConfig,
+                },
+                updatedAt: d.updatedAt || new Date().toISOString(),
+              };
+            } else if (!localMap[cleanBd]) {
+              const defProf = getDefault155OfficeProfile();
+              localMap[cleanBd] = {
+                bdNo: cleanBd,
+                userName: d.name || 'Airman',
+                rank: d.rank || 'LAC',
+                flightName: d.flightName || 'Admin',
+                trade: d.trade || 'General',
+                role: d.role || 'USER',
+                pin: String(d.password || d.pin || cleanBd),
+                officeCode: '155-UASU',
+                officeName: defProf.officeName,
+                officeLogo: defProf.officeLogo,
+                officeSlogan: defProf.officeSlogan,
+                officeBase: defProf.officeBase,
+                isDefault155: true,
+                updatedAt: d.updatedAt || new Date().toISOString(),
               };
             }
           });
         }
       }
-    }
 
-    // 3. Also scan Firestore user_profiles for any off_<CODE>__<bdNo> documents
-    const usersSnap = await getDocs(collection(masterDbInstance, 'user_profiles')).catch(() => null);
-    if (usersSnap) {
-      usersSnap.forEach((docSnap) => {
-        const docId = docSnap.id;
-        const d = docSnap.data() as any;
-        if (!d) return;
-        const cleanBd = String(d.bdNo || d.user_id || '')
-          .replace(/^BD\/?/i, '')
-          .replace(/[^0-9]/g, '')
-          .trim();
-        if (!cleanBd || cleanBd === MASTER_USER_ID || cleanBd === '53539919') return;
+      saveGlobalUserOfficeMap(localMap, false);
+    } catch {}
+    return localMap;
+  })().finally(() => {
+    inFlightGlobalUserMapPromise = null;
+  });
 
-        if (docId.startsWith('off_') && docId.includes('__')) {
-          const safeCode = docId.slice(4, docId.indexOf('__')).toUpperCase().trim();
-          const matchedOffice =
-            officeByCode.get(safeCode) ||
-            Array.from(officeByCode.values()).find(
-              (r) =>
-                String(r.officeCode || '')
-                  .toUpperCase()
-                  .replace(/[^A-Z0-9_-]/g, '_') === safeCode
-            );
-          const officeCode = matchedOffice?.officeCode || safeCode;
-          const officeName = matchedOffice?.officeName || safeCode.replace(/_/g, ' ');
-          const officeLogo = matchedOffice?.officeLogo || '/155-uasu-baf-logo.png';
-          const officeSlogan =
-            matchedOffice?.officeSlogan ||
-            matchedOffice?.firebaseConfig?.officeSlogan ||
-            'Intel • Surveillance • Strike';
-          const officeBase =
-            matchedOffice?.officeBase ||
-            matchedOffice?.firebaseConfig?.officeBase ||
-            'BAF BASE ZHR';
-          const fbConfig =
-            matchedOffice?.firebaseConfig || buildAutoCloudFirebaseConfig(officeName, officeCode);
-
-          localMap[cleanBd] = {
-            bdNo: cleanBd,
-            userName: d.name || 'Airman',
-            rank: d.rank || 'LAC',
-            flightName: d.flightName || 'Admin',
-            trade: d.trade || 'General',
-            role: d.role || 'USER',
-            pin: String(d.password || d.pin || cleanBd),
-            officeCode,
-            officeName,
-            officeLogo,
-            officeSlogan,
-            officeBase,
-            isDefault155: false,
-            officeConfig: {
-              officeName,
-              officeLogo,
-              officeSlogan,
-              officeBase,
-              officeCode,
-              firebaseConfig: fbConfig,
-            },
-            updatedAt: d.updatedAt || new Date().toISOString(),
-          };
-        } else if (!localMap[cleanBd]) {
-          const defProf = getDefault155OfficeProfile();
-          localMap[cleanBd] = {
-            bdNo: cleanBd,
-            userName: d.name || 'Airman',
-            rank: d.rank || 'LAC',
-            flightName: d.flightName || 'Admin',
-            trade: d.trade || 'General',
-            role: d.role || 'USER',
-            pin: String(d.password || d.pin || cleanBd),
-            officeCode: '155-UASU',
-            officeName: defProf.officeName,
-            officeLogo: defProf.officeLogo,
-            officeSlogan: defProf.officeSlogan,
-            officeBase: defProf.officeBase,
-            isDefault155: true,
-            updatedAt: d.updatedAt || new Date().toISOString(),
-          };
-        }
-      });
-    }
-
-    saveGlobalUserOfficeMap(localMap, false);
-  } catch {}
-
-  return localMap;
+  return inFlightGlobalUserMapPromise;
 }
 
 // ============================================================================
@@ -2625,7 +2776,7 @@ export function savePendingOfficeRequestsLocal(
     }
   } catch {}
 
-  if (syncToCloud && masterDbInstance) {
+  if (syncToCloud && masterDbInstance && !isFirestoreQuotaExceeded()) {
     setDoc(
       doc(masterDbInstance, 'app_settings', PENDING_OFFICE_REQUESTS_KEY),
       {
@@ -2640,19 +2791,31 @@ export function savePendingOfficeRequestsLocal(
   }
 }
 
-export async function fetchPendingOfficeRequestsFromMaster(): Promise<PendingOfficeRegistrationRequest[]> {
+let lastPendingRequestsFetchAt = 0;
+let inFlightPendingRequestsPromise: Promise<PendingOfficeRegistrationRequest[]> | null = null;
+
+export async function fetchPendingOfficeRequestsFromMaster(force: boolean = false): Promise<PendingOfficeRegistrationRequest[]> {
   const rejectedIds = getRejectedOfficeRequestIdsLocal();
   const localList = getPendingOfficeRequestsLocal();
-  const byId = new Map<string, PendingOfficeRegistrationRequest>();
-  localList.forEach((item) => {
-    if (item && item.id && item.status !== 'REJECTED' && !rejectedIds.has(String(item.id))) {
-      byId.set(item.id, item);
-    }
-  });
+  if (!masterDbInstance || isFirestoreQuotaExceeded()) return localList;
 
-  if (masterDbInstance) {
+  const now = Date.now();
+  if (!force && now - lastPendingRequestsFetchAt < MASTER_READ_COOLDOWN_MS) {
+    return localList;
+  }
+  if (inFlightPendingRequestsPromise) return inFlightPendingRequestsPromise;
+
+  inFlightPendingRequestsPromise = (async () => {
+    const byId = new Map<string, PendingOfficeRegistrationRequest>();
+    localList.forEach((item) => {
+      if (item && item.id && item.status !== 'REJECTED' && !rejectedIds.has(String(item.id))) {
+        byId.set(item.id, item);
+      }
+    });
+
     try {
-      const snap = await getDoc(doc(masterDbInstance, 'app_settings', PENDING_OFFICE_REQUESTS_KEY));
+      lastPendingRequestsFetchAt = Date.now();
+      const snap = await getDoc(doc(masterDbInstance!, 'app_settings', PENDING_OFFICE_REQUESTS_KEY));
       if (snap.exists()) {
         const data = snap.data();
         const rawVal = data?.value;
@@ -2685,13 +2848,17 @@ export async function fetchPendingOfficeRequestsFromMaster(): Promise<PendingOff
         }
       }
     } catch {}
-  }
 
-  const merged = Array.from(byId.values())
-    .filter((item) => item.status !== 'REJECTED' && !rejectedIds.has(String(item.id)))
-    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  savePendingOfficeRequestsLocal(merged, false, false);
-  return merged;
+    const merged = Array.from(byId.values())
+      .filter((item) => item.status !== 'REJECTED' && !rejectedIds.has(String(item.id)))
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    savePendingOfficeRequestsLocal(merged, false, false);
+    return merged;
+  })().finally(() => {
+    inFlightPendingRequestsPromise = null;
+  });
+
+  return inFlightPendingRequestsPromise;
 }
 
 export async function submitOfficeRegistrationRequest(input: {
@@ -3074,14 +3241,7 @@ export async function rejectOfficeRegistrationRequest(
     : null;
 }
 
-// Pre-warm Master Registry, Pending Requests & Master Credentials in background on app startup
-if (typeof window !== 'undefined') {
-  setTimeout(() => {
-    fetchRegisteredOfficesFromMaster().catch(() => {});
-    fetchPendingOfficeRequestsFromMaster().catch(() => {});
-    syncMasterCredentialsFromCloud().catch(() => {});
-  }, 50);
-}
+// Master registry & pending requests are fetched on-demand with a 5-minute cache cooldown
 
 // ============================================================================
 // AUTH & ERROR EXPORTS

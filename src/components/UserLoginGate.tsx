@@ -319,7 +319,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
 
   const displayedOfficeLogo = useMemo(() => {
-    if (!cleanTypedBd) return '/155-uasu-baf-logo.png';
+    if (!cleanTypedBd) return '/office-management-logo.jpg';
     if (isMasterUserTyped) {
       return selectedMasterOffice?.officeLogo || '/155-uasu-baf-logo.png';
     }
@@ -329,13 +329,13 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     if (matchedPendingRequest?.officeLogo) {
       return matchedPendingRequest.officeLogo;
     }
-    return '/155-uasu-baf-logo.png';
+    return '/office-management-logo.jpg';
   }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
 
-  // Keep Browser Tab Title & Favicon synced with the displayed/selected office on Login Portal
+  // While on Login Portal (unauthenticated), keep Browser Address Bar synced to Default Office Management Application
   useEffect(() => {
-    syncBrowserTabIdentity(displayedOfficeName, displayedOfficeLogo, '');
-  }, [displayedOfficeName, displayedOfficeLogo]);
+    syncBrowserTabIdentity('', '/office-management-logo.jpg', '');
+  }, []);
 
   const displayedOfficeSubtitle = useMemo(() => {
     if (!cleanTypedBd) return 'Centralized Multi-Office Management System';
@@ -608,7 +608,6 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
 
       await activateSelectedMasterOffice(selectedMasterOffice);
       const activeId = getActiveOfficeIdentity();
-      syncBrowserTabIdentity(activeId.officeName, activeId.officeLogo, activeId.officeBase);
 
       const targetAirmen = (() => {
         try {
@@ -619,6 +618,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       })();
       await provisionMasterOwnerInOffice(targetAirmen);
       loginAsMasterOwnerSession();
+      syncBrowserTabIdentity(activeId.officeName, activeId.officeLogo, activeId.officeBase);
       setLastUsedPortal(activeTab);
 
       setSuccessAirman({

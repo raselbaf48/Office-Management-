@@ -62,8 +62,11 @@ let activeHistorySubscribers = 0;
 let heartbeatTimer: any = null;
 let cleanupTimer: any = null;
 
-const PRESENCE_HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
-const PRESENCE_WRITE_THROTTLE_MS = 8 * 60 * 1000; // 8 minutes min between passive heartbeat writes
+const PRESENCE_HEARTBEAT_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const PRESENCE_WRITE_THROTTLE_MS = 12 * 60 * 1000; // 12 minutes min between passive heartbeat writes
+const PRESENCE_POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes between full presence collection polls
+let lastPresencePollAt = 0;
+let lastLoginHistoryPollAt = 0;
 
 function filterRecentlyOnlineUsers(list: UserPresence[]): UserPresence[] {
   const now = Date.now();
@@ -107,13 +110,16 @@ export function isMultiUserMode(): boolean {
   return getActiveUsersCount() >= 2;
 }
 
-async function pollPresenceFromCloudOnce() {
+async function pollPresenceFromCloudOnce(force: boolean = false) {
   if (typeof window === 'undefined') return;
   if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  const now = Date.now();
+  if (!force && now - lastPresencePollAt < 5 * 60 * 1000 && cachedActiveUsers.length > 0) return;
 
   try {
+    lastPresencePollAt = now;
     const snap = await getDocs(collection(dbLite, 'presence'));
     const cloudUsers: UserPresence[] = [];
     snap.forEach((docSnap) => {
@@ -151,7 +157,7 @@ function ensurePresenceRealtimeSubscription() {
   void pollPresenceFromCloudOnce();
   const pollInterval = setInterval(() => {
     void pollPresenceFromCloudOnce();
-  }, 120 * 1000);
+  }, PRESENCE_POLL_INTERVAL_MS);
 
   firestorePresenceUnsub = () => {
     clearInterval(pollInterval);
@@ -402,14 +408,14 @@ function ensureLoginHistoryRealtimeSubscription() {
   const pollInterval = setInterval(() => {
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     void refreshLoginHistoryFromCloud();
-  }, 120 * 1000);
+  }, PRESENCE_POLL_INTERVAL_MS);
 
   firestoreLoginHistoryUnsub = () => {
     clearInterval(pollInterval);
   };
 }
 
-export const refreshLoginHistoryFromCloud = async (): Promise<any[]> => {
+export const refreshLoginHistoryFromCloud = async (force: boolean = false): Promise<any[]> => {
   const local = getLocalLoginLogs();
   if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) {
     return local;
@@ -417,6 +423,11 @@ export const refreshLoginHistoryFromCloud = async (): Promise<any[]> => {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return local;
   }
+  const now = Date.now();
+  if (!force && now - lastLoginHistoryPollAt < 60 * 1000 && local.length > 0) {
+    return local;
+  }
+  lastLoginHistoryPollAt = now;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const snap = await Promise.race([

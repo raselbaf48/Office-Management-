@@ -92,6 +92,7 @@ import {
   getActiveOfficeIdentity,
   updateOfficeTelemetryUserCount,
   syncBrowserTabIdentity,
+  isDefault155UasuOffice,
 } from './firebase';
 import { setLastUsedPortal } from './services/portalPreferenceService';
 import { initGoogleDriveAuth } from './services/googleDriveService';
@@ -114,11 +115,13 @@ export default function App() {
   const [justLoggedIn, setJustLoggedIn] = useState<boolean>(false);
   const [standaloneView, setStandaloneView] = useState<'backup' | null>(null);
 
-  // Sync Browser Tab Title & Favicon with logged-in Office Name & Logo
+  // Sync Browser Tab Title & Favicon with logged-in Office Name & Logo (or Default App Identity when logged out)
   useEffect(() => {
     if (userSession) {
       const activeId = getActiveOfficeIdentity();
       syncBrowserTabIdentity(activeId.officeName, activeId.officeLogo, activeId.officeBase);
+    } else {
+      syncBrowserTabIdentity('', '/office-management-logo.jpg', '');
     }
   }, [userSession, officeIdentity]);
 
@@ -150,13 +153,15 @@ export default function App() {
     };
   }, []);
 
-  // Role-based tab security: if USER attempts to access admin-only tabs, redirect to overview
+  // Role-based & office-based tab security: if USER attempts to access admin-only tabs, or custom office accesses 155-only tab, redirect to overview
   useEffect(() => {
     const adminOnlyTabs: SidebarTab[] = ['biodata-register', 'duty-ratio', 'analytics', 'conflicts'];
     if (role === 'USER' && adminOnlyTabs.includes(activeTab)) {
       setActiveTab('overview');
+    } else if (activeTab === 'ida-center' && !isDefault155UasuOffice()) {
+      setActiveTab('overview');
     }
-  }, [role, activeTab]);
+  }, [role, activeTab, officeIdentity]);
 
   // Priority 1: Initialize Drive auth listener without flooding Firebase/Canteen reads before portal entry
   useEffect(() => {
@@ -340,6 +345,7 @@ export default function App() {
     setJustLoggedIn(false);
     handleRoleChange('USER');
     setLastUsedPortal('Office');
+    syncBrowserTabIdentity('', '/office-management-logo.jpg', '');
   };
 
   
@@ -648,8 +654,11 @@ export default function App() {
   }
 
   const renderActiveTabContent = (tab: SidebarTab) => {
-    // If regular USER attempts to view admin-only tab, gracefully fallback to overview
-    if (role === 'USER' && (tab === 'biodata-register' || tab === 'duty-ratio' || tab === 'analytics' || tab === 'conflicts')) {
+    // If regular USER attempts to view admin-only tab, or non-155 office views ida-center, gracefully fallback to overview
+    if (
+      (role === 'USER' && (tab === 'biodata-register' || tab === 'duty-ratio' || tab === 'analytics' || tab === 'conflicts')) ||
+      (tab === 'ida-center' && !isDefault155UasuOffice())
+    ) {
       tab = 'overview';
     }
     switch (tab) {

@@ -24,9 +24,10 @@ import { getFlightDutyQuotaForDate } from '../data/officialDutyRatioMatrix';
 
 interface IdaCenterDutyViewProps {
   role: UserRole;
+  userFlight?: string;
   airmen: Airman[];
   selectedDate: string;
-  onViewAirmanProfile?: (airman: Airman) => void;
+  onViewAirmanProfile?: (airman: Airman, config?: any) => void;
 }
 
 export interface IdaScheduleSlot {

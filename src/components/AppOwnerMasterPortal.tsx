@@ -35,7 +35,20 @@ import {
   ChevronRight,
   MapPin,
   Sparkles,
+  Wrench,
+  PowerOff,
 } from 'lucide-react';
+import {
+  getAppConfig,
+  saveAppConfig,
+  isFeatureActive,
+  AppConfig,
+  getAppConfigHistory,
+  addAppConfigHistory,
+  AppConfigHistoryItem,
+  updateAppConfigHistoryItemActiveStatus,
+  deleteAppConfigHistoryItem,
+} from '../utils/appConfig';
 import { signOut } from 'firebase/auth';
 import {
   masterAuth,
@@ -124,9 +137,24 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     getRegisteredOfficesLocal()
   );
 
-  const [activeTab, setActiveTab] = useState<'offices' | 'approvals' | 'settings'>(() => {
+  const [activeTab, setActiveTab] = useState<'offices' | 'approvals' | 'maintenance' | 'settings'>(() => {
     const initialReqs = getPendingOfficeRequestsLocal();
     return initialReqs.some((r) => r.status === 'PENDING') ? 'approvals' : 'offices';
+  });
+
+  // Maintenance Mode State (Master Control Panel)
+  const [appConfig, setAppConfig] = useState<AppConfig>(() => getAppConfig());
+  const [appConfigHistory, setAppConfigHistory] = useState<AppConfigHistoryItem[]>(() =>
+    getAppConfigHistory()
+  );
+  const [maintDraft, setMaintDraft] = useState(() => {
+    const cfg = getAppConfig();
+    return {
+      message: cfg.maintenance.message || '',
+      isScheduled: Boolean(cfg.maintenance.isScheduled),
+      startTime: cfg.maintenance.startTime || '',
+      endTime: cfg.maintenance.endTime || '',
+    };
   });
 
   const [isSyncingBackground, setIsSyncingBackground] = useState<boolean>(false);
@@ -213,6 +241,15 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     if (isOpen) {
       setOffices(getRegisteredOfficesLocal());
       setOfficeRequests(getPendingOfficeRequestsLocal());
+      const currentCfg = getAppConfig();
+      setAppConfig(currentCfg);
+      setAppConfigHistory(getAppConfigHistory());
+      setMaintDraft({
+        message: currentCfg.maintenance.message || '',
+        isScheduled: Boolean(currentCfg.maintenance.isScheduled),
+        startTime: currentCfg.maintenance.startTime || '',
+        endTime: currentCfg.maintenance.endTime || '',
+      });
       syncMasterCredentialsFromCloud()
         .then((creds) => {
           setCurrentMasterCreds(creds);
@@ -229,6 +266,74 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
       setHistoryOffice(null);
     }
   }, [isOpen, isOwnerAuthenticated]);
+
+  const handleSaveMaintenance = () => {
+    const updatedConfig: AppConfig = {
+      ...appConfig,
+      maintenance: {
+        isActive: true,
+        message: maintDraft.message.trim(),
+        isScheduled: maintDraft.isScheduled,
+        startTime: maintDraft.isScheduled ? maintDraft.startTime : undefined,
+        endTime: maintDraft.isScheduled ? maintDraft.endTime : undefined,
+      },
+    };
+    saveAppConfig(updatedConfig);
+    setAppConfig(updatedConfig);
+    try {
+      localDb.syncSettingToCloud('baf_app_config', JSON.stringify(updatedConfig));
+    } catch {}
+    setMaintDraft({ message: '', isScheduled: false, startTime: '', endTime: '' });
+    if (maintDraft.message.trim()) {
+      setAppConfigHistory(
+        addAppConfigHistory({
+          type: 'MAINTENANCE',
+          message: maintDraft.message.trim(),
+          startTime: maintDraft.isScheduled ? maintDraft.startTime : undefined,
+          endTime: maintDraft.isScheduled ? maintDraft.endTime : undefined,
+          isActive: true,
+        })
+      );
+    }
+    setApprovalBanner('Maintenance Mode has been enabled globally.');
+  };
+
+  const handleDeactivateMaintenance = () => {
+    const updatedConfig: AppConfig = {
+      ...appConfig,
+      maintenance: {
+        ...appConfig.maintenance,
+        isActive: false,
+      },
+    };
+    saveAppConfig(updatedConfig);
+    setAppConfig(updatedConfig);
+    try {
+      localDb.syncSettingToCloud('baf_app_config', JSON.stringify(updatedConfig));
+    } catch {}
+    const activeItem = appConfigHistory.find(
+      (i) => i.type === 'MAINTENANCE' && i.isActive
+    );
+    if (activeItem) {
+      setAppConfigHistory(updateAppConfigHistoryItemActiveStatus(activeItem.id, false));
+    }
+    setApprovalBanner('Maintenance Mode has been deactivated.');
+  };
+
+  const handleDeleteMaintenanceHistoryItem = (item: AppConfigHistoryItem) => {
+    if (item.isActive) {
+      const updatedConfig: AppConfig = {
+        ...appConfig,
+        maintenance: { ...appConfig.maintenance, isActive: false },
+      };
+      saveAppConfig(updatedConfig);
+      setAppConfig(updatedConfig);
+      try {
+        localDb.syncSettingToCloud('baf_app_config', JSON.stringify(updatedConfig));
+      } catch {}
+    }
+    setAppConfigHistory(deleteAppConfigHistoryItem(item.id));
+  };
 
   useEffect(() => {
     const onReqUpdate = (e: Event) => {
@@ -551,17 +656,17 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
         localDb.switchActiveOfficeWorkspace(false);
       }
 
-      syncBrowserTabIdentity(
-        office.officeName,
-        office.officeLogo || '/155-uasu-baf-logo.png',
-        office.officeBase || 'BAF BASE ZHR'
-      );
-
       // Ensure Master Owner exists in that office's local & Firebase user registry
       await provisionMasterOwnerInOffice(localDb.getAirmen() || airmen);
 
       // Set active session as Master Owner
       loginAsMasterOwnerSession();
+
+      syncBrowserTabIdentity(
+        office.officeName,
+        office.officeLogo || '/155-uasu-baf-logo.png',
+        office.officeBase || 'BAF BASE ZHR'
+      );
 
       // Redirect immediately into that office's dashboard with full admin privileges
       onClose();
@@ -837,6 +942,32 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
 
                 <button
                   type="button"
+                  onClick={() => setActiveTab('maintenance')}
+                  className={`w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    activeTab === 'maintenance'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Wrench className="w-4 h-4 shrink-0" />
+                    <span>Maintenance Mode</span>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-black ${
+                      activeTab === 'maintenance'
+                        ? 'bg-white/20 text-white'
+                        : isFeatureActive(appConfig.maintenance)
+                        ? 'bg-rose-500 text-white animate-pulse'
+                        : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                    }`}
+                  >
+                    {isFeatureActive(appConfig.maintenance) ? 'LIVE' : 'OFF'}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => {
                     setActiveTab('settings');
                     setMasterSettingsError('');
@@ -895,6 +1026,8 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                       ? 'Registered Office Workspaces'
                       : activeTab === 'approvals'
                       ? 'New Office Approval Queue'
+                      : activeTab === 'maintenance'
+                      ? 'Global System Maintenance Mode'
                       : 'Master Security & Credentials'}
                   </h2>
                   <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25">
@@ -907,6 +1040,8 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                     ? 'Inspect, enter, disable/enable, or view login history for any registered office.'
                     : activeTab === 'approvals'
                     ? 'Review and approve new office setup requests submitted from the login portal.'
+                    : activeTab === 'maintenance'
+                    ? 'Activate, schedule, or deactivate global application maintenance mode across all offices.'
                     : 'Manage your Master User ID and Master PIN for global workspace access.'}
                 </p>
               </div>
@@ -1454,6 +1589,159 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                       })}
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* TAB: MAINTENANCE MODE */}
+              {activeTab === 'maintenance' && (
+                <div className="space-y-6 max-w-2xl">
+                  {appConfig.maintenance.isActive && (
+                    <div className="p-4 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-700/60 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+                      <div className="flex items-start gap-3">
+                        <div className="w-9 h-9 rounded-xl bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0 mt-0.5">
+                          <Wrench className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-black uppercase tracking-wider text-red-800 dark:text-red-300">
+                              Maintenance Mode is Active
+                            </span>
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-300">
+                              Live
+                            </span>
+                          </div>
+                          <p className="text-xs font-bold text-slate-800 dark:text-slate-200 mt-1">
+                            {appConfig.maintenance.message}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleDeactivateMaintenance}
+                        className="px-4 py-2 bg-slate-800 hover:bg-slate-900 dark:bg-slate-200 dark:hover:bg-white text-white dark:text-slate-900 rounded-xl text-xs font-bold shadow-sm transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap self-start sm:self-auto cursor-pointer"
+                      >
+                        <PowerOff className="w-3.5 h-3.5" /> Deactivate
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider border-b border-slate-200 dark:border-slate-800 pb-3 mb-4">
+                      Activate Maintenance Mode
+                    </h3>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-slate-500">
+                        Maintenance Message <span className="text-rose-500">*</span>
+                      </label>
+                      <textarea
+                        value={maintDraft.message}
+                        onChange={(e) =>
+                          setMaintDraft({ ...maintDraft, message: e.target.value })
+                        }
+                        placeholder="e.g. System is down for scheduled upgrades."
+                        rows={4}
+                        className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 outline-none focus:border-emerald-500 text-slate-900 dark:text-white resize-none text-sm"
+                      />
+                    </div>
+
+                    <div className="pt-2">
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={maintDraft.isScheduled}
+                          onChange={(e) =>
+                            setMaintDraft({ ...maintDraft, isScheduled: e.target.checked })
+                          }
+                          className="w-5 h-5 text-red-600 rounded-md border-slate-300 focus:ring-red-500 dark:border-slate-600 dark:bg-slate-900"
+                        />
+                        <span className="text-sm font-bold text-slate-700 dark:text-slate-300">
+                          Schedule maintenance window
+                        </span>
+                      </label>
+                    </div>
+
+                    {maintDraft.isScheduled && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-slate-500">
+                            Start Time
+                          </label>
+                          <input
+                            type="datetime-local"
+                            value={maintDraft.startTime}
+                            onChange={(e) =>
+                              setMaintDraft({ ...maintDraft, startTime: e.target.value })
+                            }
+                            className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 outline-none focus:border-emerald-500 text-slate-900 dark:text-white text-sm"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-slate-500">
+                            End Time
+                          </label>
+                          <input
+                            type="datetime-local"
+                            value={maintDraft.endTime}
+                            onChange={(e) =>
+                              setMaintDraft({ ...maintDraft, endTime: e.target.value })
+                            }
+                            className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 outline-none focus:border-emerald-500 text-slate-900 dark:text-white text-sm"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="pt-4 flex justify-end">
+                      <button
+                        type="button"
+                        disabled={!maintDraft.message.trim()}
+                        onClick={handleSaveMaintenance}
+                        className="px-6 py-2.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-2 cursor-pointer"
+                      >
+                        <Wrench className="w-4 h-4" /> Enable Maintenance Mode
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider border-b border-slate-200 dark:border-slate-800 pb-3 mb-4">
+                      Maintenance History
+                    </h3>
+                    {appConfigHistory.filter((h) => h.type === 'MAINTENANCE').length === 0 ? (
+                      <p className="text-sm text-slate-500">No maintenance records.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {appConfigHistory
+                          .filter((h) => h.type === 'MAINTENANCE')
+                          .map((h) => (
+                            <div
+                              key={h.id}
+                              className="p-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl flex items-center justify-between"
+                            >
+                              <div>
+                                <p className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                                  Maintenance Mode
+                                </p>
+                                <p className="text-xs text-slate-500 line-clamp-1">
+                                  {h.message}
+                                </p>
+                                <p className="text-[10px] text-slate-400 mt-1">
+                                  {new Date(h.createdAt).toLocaleString()}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteMaintenanceHistoryItem(h)}
+                                className="p-2 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20 rounded-lg cursor-pointer"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 

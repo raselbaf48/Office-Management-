@@ -750,46 +750,78 @@ function getSyncManifestDocId(): string {
   return prefix ? sanitizeDocId(`${prefix}sync_manifest`) : 'sync_manifest';
 }
 
-export async function fetchSyncManifestFromFirebase(): Promise<SyncManifest | null> {
+let lastManifestFetchAt = 0;
+let lastManifestFetchDocId = '';
+let cachedManifestResult: SyncManifest | null = null;
+let inFlightManifestPromise: Promise<SyncManifest | null> | null = null;
+
+export async function fetchSyncManifestFromFirebase(force: boolean = false): Promise<SyncManifest | null> {
   if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return null;
   const manifestDocId = getSyncManifestDocId();
-  try {
-    const snap = await withFirestoreTimeout(
-      getDoc(doc(dbLite, 'system_meta', manifestDocId)),
-      6000,
-      'get:sync_manifest'
-    );
-    if (!snap.exists()) return null;
-    return snap.data() as SyncManifest;
-  } catch (err: any) {
-    if (isQuotaExceededError(err)) {
-      setFirestoreQuotaExceeded(true, err?.message);
-      return null;
-    }
-    // REST fallback for sync_manifest if SDK read timed out
-    if (typeof fetch === 'function') {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
-      try {
-        const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
-          firebaseConfig.projectId
-        )}/databases/${encodeURIComponent(
-          firebaseConfig.firestoreDatabaseId || '(default)'
-        )}/documents/system_meta/${encodeURIComponent(manifestDocId)}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
-        const headers = await getOptionalAuthHeaders();
-        const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
-        if (res.ok) {
-          const docJson = await res.json();
-          if (docJson?.fields) {
-            return decodeFirestoreRestFields(docJson.fields) as SyncManifest;
-          }
-        }
-      } catch {} finally {
-        clearTimeout(timer);
-      }
-    }
-    return null;
+  const now = Date.now();
+  if (
+    !force &&
+    manifestDocId === lastManifestFetchDocId &&
+    now - lastManifestFetchAt < 15000 &&
+    cachedManifestResult
+  ) {
+    return cachedManifestResult;
   }
+  if (inFlightManifestPromise && manifestDocId === lastManifestFetchDocId) {
+    return inFlightManifestPromise;
+  }
+
+  lastManifestFetchDocId = manifestDocId;
+  inFlightManifestPromise = (async () => {
+    try {
+      const snap = await withFirestoreTimeout(
+        getDoc(doc(dbLite, 'system_meta', manifestDocId)),
+        6000,
+        'get:sync_manifest'
+      );
+      lastManifestFetchAt = Date.now();
+      if (!snap.exists()) {
+        cachedManifestResult = null;
+        return null;
+      }
+      cachedManifestResult = snap.data() as SyncManifest;
+      return cachedManifestResult;
+    } catch (err: any) {
+      if (isQuotaExceededError(err)) {
+        setFirestoreQuotaExceeded(true, err?.message);
+        return null;
+      }
+      // REST fallback for sync_manifest if SDK read timed out
+      if (typeof fetch === 'function') {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        try {
+          const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+            firebaseConfig.projectId
+          )}/databases/${encodeURIComponent(
+            firebaseConfig.firestoreDatabaseId || '(default)'
+          )}/documents/system_meta/${encodeURIComponent(manifestDocId)}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+          const headers = await getOptionalAuthHeaders();
+          const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+          if (res.ok) {
+            const docJson = await res.json();
+            if (docJson?.fields) {
+              lastManifestFetchAt = Date.now();
+              cachedManifestResult = decodeFirestoreRestFields(docJson.fields) as SyncManifest;
+              return cachedManifestResult;
+            }
+          }
+        } catch {} finally {
+          clearTimeout(timer);
+        }
+      }
+      return cachedManifestResult;
+    }
+  })().finally(() => {
+    inFlightManifestPromise = null;
+  });
+
+  return inFlightManifestPromise;
 }
 
 // -------------------- Sync Manifest --------------------
@@ -817,23 +849,23 @@ export async function publishSyncManifest(
     const safeCollections = changedCollections
       .filter((c) => typeof c === 'string' && c.trim().length > 0)
       .slice(0, 20);
+    const nextManifest: SyncManifest = {
+      id: manifestDocId,
+      revision: Date.now(),
+      updatedAt: nowIso,
+      updatedBySessionId: CLIENT_SESSION_ID.slice(0, 128),
+      updatedByBdNo: getCurrentBdNo() || 'system',
+      lastReason: clampStr(reason, 200) || 'delta_sync',
+      changedCollections: safeCollections,
+    };
     await withFirestoreTimeout(
-      setDoc(
-        doc(dbLite, 'system_meta', manifestDocId),
-        {
-          id: manifestDocId,
-          revision: Date.now(),
-          updatedAt: nowIso,
-          updatedBySessionId: CLIENT_SESSION_ID.slice(0, 128),
-          updatedByBdNo: getCurrentBdNo() || 'system',
-          lastReason: clampStr(reason, 200) || 'delta_sync',
-          changedCollections: safeCollections,
-        },
-        { merge: true }
-      ),
+      setDoc(doc(dbLite, 'system_meta', manifestDocId), nextManifest, { merge: true }),
       8000,
       'set:sync_manifest'
     );
+    lastManifestFetchAt = Date.now();
+    lastManifestFetchDocId = manifestDocId;
+    cachedManifestResult = nextManifest;
   } catch (err: any) {
     if (isQuotaExceededError(err)) {
       setFirestoreQuotaExceeded(true, err?.message);
@@ -878,7 +910,7 @@ function ensureSharedManifestListener() {
   void pollSharedManifestOnce();
   sharedManifestTimer = setInterval(() => {
     void pollSharedManifestOnce();
-  }, 60 * 1000);
+  }, 180 * 1000);
 }
 
 export function subscribeToSyncManifest(

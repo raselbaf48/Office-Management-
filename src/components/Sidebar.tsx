@@ -36,7 +36,7 @@ import {
 } from 'lucide-react';
 import { UserRole } from '../types';
 import { UserSession } from '../utils/authSession';
-import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
 
 export type SidebarTab =
   | 'overview'
@@ -410,6 +410,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
                   className={isCollapsed ? 'space-y-1.5' : 'mt-1.5 space-y-1.5 overflow-hidden'}
                 >
+                  {isDefault155UasuOffice() &&
+                    renderNavButton('ida-center', <Clock className="w-4 h-4 shrink-0" />, 'IDA Center Duty', 'IDA Center Duty (Morning / Afternoon / Night)', undefined, isMobileDrawer)}
                   {renderNavButton('duty-roster', <FileText className="w-4 h-4 shrink-0" />, 'Duty Roster', 'Duty Roster Period & Export', undefined, isMobileDrawer)}
                 </motion.div>
               )}

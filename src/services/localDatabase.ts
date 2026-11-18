@@ -280,9 +280,9 @@ function getYesterdayDateStr(dateStr: string): string {
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-const SINGLE_USER_BACKUP_INTERVAL_MS = 4000; // 4 seconds trailing debounce
-const MULTI_USER_BACKUP_INTERVAL_MS = 2500; // 2.5 seconds trailing debounce
-const MULTI_USER_POLL_INTERVAL_MS = 15000; // 15 seconds safety check ticker
+const SINGLE_USER_BACKUP_INTERVAL_MS = 12000; // 12 seconds trailing debounce to batch edits
+const MULTI_USER_BACKUP_INTERVAL_MS = 6000; // 6 seconds trailing debounce to batch edits
+const MULTI_USER_POLL_INTERVAL_MS = 45000; // 45 seconds safety check ticker
 const LAST_FIREBASE_PULL_KEY = 'baf_last_firebase_pull_at';
 const LAST_HANDLED_REVISION_KEY = 'baf_last_handled_sync_revision';
 const SETTING_PREFIXES = ['baf_', 'savedDisposalKeys', 'parade_historical', 'flg_wg_'];
@@ -579,6 +579,7 @@ export class LocalDatabaseEngine {
     this.lastHandledRevision = revision;
     if (typeof window !== 'undefined') {
       try {
+        window.localStorage.setItem(getActiveLastRevisionKey(), String(revision));
         window.localStorage.setItem(LAST_HANDLED_REVISION_KEY, String(revision));
       } catch {}
     }
@@ -1031,14 +1032,10 @@ export class LocalDatabaseEngine {
 
       emitSyncProgress(15, 'Checking Firebase sync manifest...');
 
-      const hasLocalAssignments = Object.values(this.db.assignments || {}).some(
-        (list) => Array.isArray(list) && list.length > 0
-      );
       const canUseIncremental =
         !options?.forceFullPull &&
         Boolean(this.lastPullAt) &&
-        (this.db.airmen || []).length > 0 &&
-        hasLocalAssignments;
+        (this.db.airmen || []).length > 0;
 
       const manifest = canUseIncremental ? await fetchSyncManifestFromFirebase() : null;
       const manifestMs = manifest?.updatedAt ? this.parseTimeMs(manifest.updatedAt) : 0;
@@ -1047,7 +1044,6 @@ export class LocalDatabaseEngine {
       const officeCols = ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'];
 
       // Ultra-fast path: ONLY skip when manifest updatedAt <= lastPullAt and no local pending deltas exist
-      // (Never skip based on changedCollections alone because Canteen/other pushes overwrite that array!)
       if (
         canUseIncremental &&
         manifest &&
@@ -1074,9 +1070,9 @@ export class LocalDatabaseEngine {
         return true;
       }
 
-      // Subtract 5-minute clock-skew overlap so writes from devices with slightly skewed clocks are never skipped
+      // Subtract 10-second clock-skew overlap instead of 5 minutes so bulk duty writes are not re-downloaded repeatedly
       const overlapIso = lastPullMs > 0
-        ? new Date(Math.max(0, lastPullMs - 5 * 60 * 1000)).toISOString()
+        ? new Date(Math.max(0, lastPullMs - 10 * 1000)).toISOString()
         : this.lastPullAt;
       const useSinceIso = canUseIncremental && manifest ? overlapIso : undefined;
       emitSyncProgress(30, useSinceIso ? 'Fetching recent changes from Firebase...' : 'Fetching database from Firebase Firestore...');
@@ -1490,6 +1486,7 @@ export class LocalDatabaseEngine {
       this.seedBaselineSettingsMap();
       const nowIso = new Date().toISOString();
       this.lastPullAt = nowIso;
+      window.localStorage.setItem(getActiveLastPullKey(), nowIso);
       window.localStorage.setItem(LAST_FIREBASE_PULL_KEY, nowIso);
 
       firebaseConnected = true;
@@ -1565,7 +1562,7 @@ export class LocalDatabaseEngine {
 
     const lastPullMs = this.parseTimeMs(this.lastPullAt);
     const since = lastPullMs > 0
-      ? new Date(Math.max(0, lastPullMs - 5 * 60 * 1000)).toISOString()
+      ? new Date(Math.max(0, lastPullMs - 10 * 1000)).toISOString()
       : (this.lastPullAt || undefined);
     const targets = changedCollections && changedCollections.length > 0
       ? changedCollections
@@ -2056,6 +2053,7 @@ export class LocalDatabaseEngine {
 
         const nowIso = new Date().toISOString();
         this.lastPullAt = nowIso;
+        window.localStorage.setItem(getActiveLastPullKey(), nowIso);
         window.localStorage.setItem(LAST_FIREBASE_PULL_KEY, nowIso);
         window.localStorage.removeItem('baf_pending_sync');
         firebaseConnected = true;

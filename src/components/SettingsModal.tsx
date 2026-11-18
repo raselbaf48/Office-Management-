@@ -957,8 +957,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     ...(isRunningInApk() ? [{ id: 'appUpdate', label: 'In-App Update (APK)', icon: <Download className="w-5 h-5" />, color: 'text-emerald-500 bg-emerald-100 dark:bg-emerald-950 dark:text-emerald-400' }] : []),
     ...(isAdminRole ? [{ id: 'cloudsync', label: 'Database Cloud Sync & Invite', icon: <Cloud className="w-5 h-5" />, color: 'text-blue-500 bg-blue-100 dark:bg-blue-950 dark:text-blue-400' }] : []),
     ...(isAdminRole ? [
-      { id: 'appNotice', label: 'App Notice', icon: <Megaphone className="w-5 h-5" />, color: 'text-orange-500 bg-orange-100 dark:bg-orange-950 dark:text-orange-400' },
-      { id: 'maintenanceMode', label: 'Maintenance Mode', icon: <Wrench className="w-5 h-5" />, color: 'text-red-500 bg-red-100 dark:bg-red-950 dark:text-red-400' }
+      { id: 'appNotice', label: 'App Notice', icon: <Megaphone className="w-5 h-5" />, color: 'text-orange-500 bg-orange-100 dark:bg-orange-950 dark:text-orange-400' }
     ] : []),
     ...(isAdminRole ? [{ id: 'users', label: 'User Management', icon: <ShieldCheck className="w-5 h-5" />, color: 'text-purple-500 bg-purple-100 dark:bg-purple-950 dark:text-purple-400' }] : []),
     { id: 'security', label: 'Security & Passcode', icon: <Lock className="w-5 h-5" />, color: 'text-amber-500 bg-amber-100 dark:bg-amber-950 dark:text-amber-400' },
@@ -1791,103 +1790,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>)}
 
 
-        
-        {activeSection === 'maintenanceMode' && isAdminRole && (
-            <div className="space-y-6 animate-fadeIn max-w-2xl">
-                    {appConfig.maintenance.isActive && (
-                      <div className="p-4 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-700/60 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm animate-fadeIn">
-                        <div className="flex items-start gap-3">
-                          <div className="w-9 h-9 rounded-xl bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0 mt-0.5">
-                            <Wrench className="w-5 h-5" />
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs font-black uppercase tracking-wider text-red-800 dark:text-red-300">Maintenance Mode is Active</span>
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-300">
-                                Live
-                              </span>
-                              {appConfig.maintenance.isScheduled && appConfig.maintenance.endTime && (
-                                <Countdown endTime={appConfig.maintenance.endTime} />
-                              )}
-                            </div>
-                            <p className="text-xs font-bold text-slate-800 dark:text-slate-200 mt-1">
-                              {appConfig.maintenance.message}
-                            </p>
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const updatedConfig = { ...appConfig, maintenance: { ...appConfig.maintenance, isActive: false } };
-                            saveAppConfig(updatedConfig);
-                            setAppConfig(updatedConfig);
-                            const activeItem = appConfigHistory.find(i => i.type === 'MAINTENANCE' && i.isActive);
-                            if (activeItem) {
-                              setAppConfigHistory(updateAppConfigHistoryItemActiveStatus(activeItem.id, false));
-                            }
-                          }}
-                          className="px-4 py-2 bg-slate-800 hover:bg-slate-900 dark:bg-slate-200 dark:hover:bg-white text-white dark:text-slate-900 rounded-xl text-xs font-bold shadow-sm transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap self-start sm:self-auto"
-                        >
-                          <PowerOff className="w-3.5 h-3.5" /> Deactivate
-                        </button>
-                      </div>
-                    )}
 
-                    <div className="bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-2xl p-6 shadow-sm space-y-4">
-                      <h3 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider border-b border-slate-200 dark:border-slate-700 pb-3 mb-4">Activate Maintenance Mode</h3>
-                      
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-bold text-slate-500">Maintenance Message <span className="text-rose-500">*</span></label>
-                        <textarea value={maintDraft.message} onChange={(e) => setMaintDraft({...maintDraft, message: e.target.value})} placeholder="e.g. System is down for scheduled upgrades." rows={4} className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 outline-none focus:border-emerald-500 text-slate-900 dark:text-white resize-none" />
-                      </div>
-
-                      <div className="pt-2">
-                        <label className="flex items-center gap-3 cursor-pointer">
-                          <input type="checkbox" checked={maintDraft.isScheduled} onChange={(e) => setMaintDraft({...maintDraft, isScheduled: e.target.checked})} className="w-5 h-5 text-red-600 rounded-md border-slate-300 focus:ring-red-500 dark:border-slate-600 dark:bg-slate-900" />
-                          <span className="text-sm font-bold text-slate-700 dark:text-slate-300">Schedule maintenance window</span>
-                        </label>
-                      </div>
-
-                      {maintDraft.isScheduled && (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-                           <div className="space-y-1.5">
-                              <label className="text-xs font-bold text-slate-500">Start Time</label>
-                              <input type="datetime-local" value={maintDraft.startTime} onChange={(e) => setMaintDraft({...maintDraft, startTime: e.target.value})} className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 outline-none focus:border-emerald-500 text-slate-900 dark:text-white" />
-                           </div>
-                           <div className="space-y-1.5">
-                              <label className="text-xs font-bold text-slate-500">End Time</label>
-                              <input type="datetime-local" value={maintDraft.endTime} onChange={(e) => setMaintDraft({...maintDraft, endTime: e.target.value})} className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 outline-none focus:border-emerald-500 text-slate-900 dark:text-white" />
-                           </div>
-                        </div>
-                      )}
-
-                      <div className="pt-4 flex justify-end">
-                        <button disabled={!maintDraft.message.trim()} onClick={handleSaveMaintenance} className="px-6 py-2.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl font-bold transition-colors flex items-center gap-2">
-                          <Wrench className="w-4 h-4" /> Enable Maintenance Mode
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-2xl p-6 shadow-sm space-y-4">
-                      <h3 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider border-b border-slate-200 dark:border-slate-700 pb-3 mb-4">Maintenance History</h3>
-                      {appConfigHistory.filter(h => h.type === 'MAINTENANCE').length === 0 ? (
-                        <p className="text-sm text-slate-500">No maintenance records.</p>
-                      ) : (
-                        <div className="space-y-3">
-                          {appConfigHistory.filter(h => h.type === 'MAINTENANCE').map(h => (
-                            <div key={h.id} className="p-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl flex items-center justify-between">
-                              <div>
-                                <p className="text-sm font-bold text-slate-800 dark:text-slate-200">Maintenance Mode</p>
-                                <p className="text-xs text-slate-500 line-clamp-1">{h.message}</p>
-                                <p className="text-[10px] text-slate-400 mt-1">{new Date(h.timestamp).toLocaleString()}</p>
-                              </div>
-                              <button onClick={() => handleDeleteHistoryItem(h)} className="p-2 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20 rounded-lg"><Trash2 className="w-4 h-4" /></button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>)}
 
 
         
