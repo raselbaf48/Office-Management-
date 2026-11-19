@@ -27,6 +27,11 @@ import {
   updateOfficeTelemetryUserCount,
   getOfficeScopedStorageKey,
   isDefault155UasuOffice,
+  doesOfficeHaveFlights,
+  getActiveOfficeCode,
+  getActiveOfficeIdentity,
+  getPendingOfficeRequestsLocal,
+  getGlobalUserOfficeMap,
   markUserPostedOutInGlobalDirectory,
   registerUsersInGlobalOfficeDirectory,
 } from '../firebase';
@@ -541,6 +546,9 @@ export class LocalDatabaseEngine {
       });
       window.addEventListener("baf_signatures_updated", (e: any) => { if (e.detail?.source !== 'firebase') this.saveToFirebase(this.db, false); });
       window.addEventListener("baf_logo_updated", (e: any) => { if (e.detail?.source !== 'firebase') this.saveToFirebase(this.db, false); });
+      window.addEventListener("baf_detailed_users_changed", () => {
+        this.reconcileCustomOfficeAirmenAndUsers(this.db, true);
+      });
 
       // React to active user count switching between single (30m) and multi (10s)
       window.addEventListener('baf_active_users_changed', () => {
@@ -1100,20 +1108,24 @@ export class LocalDatabaseEngine {
         (arr) => Array.isArray(arr) && arr.length > 0
       );
 
-      const canUseIncremental =
-        !options?.forceFullPull &&
-        hasLocalAirmen;
-
-      const manifest = canUseIncremental ? await fetchSyncManifestFromFirebase() : null;
+      const manifest = !options?.forceFullPull && hasLocalAirmen ? await fetchSyncManifestFromFirebase() : null;
       const manifestMs = manifest?.updatedAt ? this.parseTimeMs(manifest.updatedAt) : 0;
       const lastPullMs = this.lastPullAt ? this.parseTimeMs(this.lastPullAt) : 0;
 
-      // Ultra-fast path: skip when manifest updatedAt <= lastPullAt (or manifest doesn't exist yet while local data is present) and no local pending deltas exist
+      const canUseIncremental =
+        !options?.forceFullPull &&
+        hasLocalAirmen &&
+        Boolean(manifest) &&
+        lastPullMs > 0;
+
+      // Ultra-fast path: skip when manifest updatedAt <= lastPullAt and no local pending deltas exist
       if (
         canUseIncremental &&
         !hasPendingDeltas() &&
-        ((manifest && manifestMs > 0 && lastPullMs > 0 && manifestMs <= lastPullMs) ||
-          (!manifest && lastPullMs > 0))
+        manifest &&
+        manifestMs > 0 &&
+        lastPullMs > 0 &&
+        manifestMs <= lastPullMs
       ) {
         if (manifest?.revision) {
           this.recordHandledRevision(manifest.revision);
@@ -1170,7 +1182,13 @@ export class LocalDatabaseEngine {
           fetchUserProfilesFromFirebase(),
           fetchAppSettingsWithMetaFromFirebase(),
         ]);
-        fbAssignments = await fetchDutyAssignmentsFromFirebase(hasLocalAssignments ? fallbackRecentIso : undefined);
+        const isBrandNewEmptyCloud =
+          fbAirmen.length === 0 &&
+          fbUsers.length === 0 &&
+          Object.keys(fbSettingsMeta).length === 0;
+        fbAssignments = isBrandNewEmptyCloud
+          ? []
+          : await fetchDutyAssignmentsFromFirebase(hasLocalAssignments ? fallbackRecentIso : undefined);
       }
 
       emitSyncProgress(60, 'Reconciling cloud & local records...');
@@ -1461,6 +1479,10 @@ export class LocalDatabaseEngine {
           window.localStorage.setItem(getActiveDetailedUsersStorageKey(), JSON.stringify(newDb.detailedUsers));
           window.dispatchEvent(new CustomEvent('baf_detailed_users_changed', { detail: newDb.detailedUsers }));
         } catch {}
+      }
+
+      if (!isDefaultOffice) {
+        this.reconcileCustomOfficeAirmenAndUsers(newDb, false);
       }
 
       // 5. Reconcile App Settings
@@ -2394,8 +2416,14 @@ export class LocalDatabaseEngine {
               lastUpdated: parsed.lastUpdated || new Date().toISOString(),
             };
 
-            // If duplicates or corrupted entries were purged from localStorage, immediately save the clean DB
+            let reconciled = false;
+            if (!isDefault155) {
+              reconciled = this.reconcileCustomOfficeAirmenAndUsers(db, false);
+            }
+
+            // If duplicates or corrupted entries were purged or custom office airmen reconciled, immediately save the clean DB
             if (
+              reconciled ||
               dedupedAirmen.length !== parsed.airmen.length ||
               sanitizedDetailedUsers.length !== (parsed.detailedUsers || []).length ||
               hadCorruptedAssignments
@@ -2417,7 +2445,7 @@ export class LocalDatabaseEngine {
 
     const initialPasscode = DEFAULT_ADMIN_PASSCODE;
     if (!isDefault155) {
-      // Brand-New Office: Start completely empty with zero 155 UASU data!
+      // Custom Office: Start with zero 155 UASU data, then reconcile any registered/approved office users!
       const brandNewDb: LocalStorageDB = {
         airmen: [],
         assignments: {},
@@ -2427,6 +2455,7 @@ export class LocalDatabaseEngine {
         importHistory: [],
         lastUpdated: new Date().toISOString(),
       };
+      this.reconcileCustomOfficeAirmenAndUsers(brandNewDb, false);
       this.saveToStorage(brandNewDb, false, false, true);
       return brandNewDb;
     }
@@ -2524,14 +2553,215 @@ export class LocalDatabaseEngine {
     });
   }
 
+  public reconcileCustomOfficeAirmenAndUsers(
+    targetDb: LocalStorageDB = this.db,
+    saveIfChanged: boolean = true
+  ): boolean {
+    if (!targetDb || isDefault155UasuOffice()) return false;
+    const officeCode = getActiveOfficeCode();
+    const safeCode = officeCode.replace(/[^A-Z0-9_-]/g, '_');
+    const identity = getActiveOfficeIdentity();
+
+    const isMasterBd = (raw: any, role?: any, isProt?: any): boolean => {
+      if (isProt === true || role === 'master_owner') return true;
+      const digits = String(raw || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+      return !digits || digits === '48456' || digits === '53539919';
+    };
+
+    const airmenByBd = new Map<string, Airman>();
+    let changed = false;
+
+    (targetDb.airmen || []).forEach((a: any) => {
+      if (!a) return;
+      const digits = String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+      if (!digits || isMasterBd(digits, (a as any).role, a.isProtected)) return;
+      const canonicalId = `BD/${digits}`;
+      // Clear 155 UASU default flights on custom offices that do not have flights
+      const cleanFlight = '';
+      if (a.id !== canonicalId || a.bdNo !== digits || (a.flightName && ['Mechanics', 'Avionics', 'GCS', 'Admin'].includes(a.flightName))) {
+        changed = true;
+      }
+      airmenByBd.set(digits, {
+        ...a,
+        id: canonicalId,
+        bdNo: digits,
+        flightName: cleanFlight as FlightName,
+      });
+    });
+
+    const mergeCandidateIntoAirmen = (cand: any, sourceLabel: string) => {
+      if (!cand || typeof cand !== 'object') return;
+      const digits = String(cand.bdNo || cand.userId || cand.id || '')
+        .replace(/^BD\/?/i, '')
+        .replace(/\D/g, '')
+        .trim();
+      if (!digits || isMasterBd(digits, cand.role || cand.userRole, cand.isProtected)) return;
+      // Skip auto-synced 155 UASU nominal roll accounts if they don't belong to this custom office
+      if (
+        (cand.remarks === 'Auto-synced from Nominal Roll' || cand.detailedBy === 'System Auto Sync') &&
+        !airmenByBd.has(digits)
+      ) {
+        return;
+      }
+
+      const existing = airmenByBd.get(digits);
+      const candSurname = String(cand.surname || cand.name || cand.userName || cand.fullName || 'Airman').trim();
+      const candFullName = String(cand.fullName || cand.name || cand.userName || candSurname).trim();
+      const candRank = String(cand.rank || 'LAC').trim() || 'LAC';
+      const candTrade =
+        cand.trade && cand.trade !== 'System Control' && cand.trade !== 'Master Control'
+          ? String(cand.trade).trim()
+          : 'Radio Fitt';
+      const candMobile = String(cand.mobileNo || cand.contactNo || '').trim();
+      const candAddress = String(
+        cand.addressBlock || cand.presentAddress || cand.officeBase || identity.officeBase || 'BAF BASE ZHR'
+      ).trim();
+
+      if (!existing) {
+        const shortCode =
+          candSurname
+            .replace(/[^a-zA-Z]/g, '')
+            .slice(0, 3)
+            .toUpperCase() || 'USR';
+        const newAirman: Airman = {
+          id: `BD/${digits}`,
+          serNo: airmenByBd.size + 1,
+          seniority: airmenByBd.size + 1,
+          code: cand.code || `${candRank}-${shortCode}`,
+          bdNo: digits,
+          rank: candRank,
+          fullName: candFullName,
+          name: candSurname,
+          trade: candTrade,
+          addressBlock: candAddress,
+          permanentAddress: cand.permanentAddress || '',
+          bloodGroup: cand.bloodGroup || '',
+          mobileNo: candMobile,
+          email: cand.email || cand.gmail || undefined,
+          flightName: '' as FlightName,
+          dateJoined: cand.dateJoined || cand.postingDate || '',
+          dateLeft: cand.dateLeft || '',
+          leaveReason: cand.leaveReason || '',
+          remarks: cand.remarks || sourceLabel,
+          active:
+            cand.status === 'SUSPENDED' || cand.status === 'DISABLED' || cand.active === false
+              ? false
+              : true,
+        };
+        airmenByBd.set(digits, newAirman);
+        changed = true;
+      } else {
+        // Enrich missing or updated fields from User Management / Registration request
+        let entryUpdated = false;
+        const next = { ...existing };
+        if (candMobile && (!next.mobileNo || next.mobileNo === '01700000000')) {
+          next.mobileNo = candMobile;
+          entryUpdated = true;
+        }
+        if (candTrade && (!next.trade || next.trade === 'General' || next.trade === 'General Tech')) {
+          next.trade = candTrade;
+          entryUpdated = true;
+        }
+        if (candFullName && (!next.fullName || next.fullName === next.name) && candFullName !== next.fullName) {
+          next.fullName = candFullName;
+          entryUpdated = true;
+        }
+        if (entryUpdated) {
+          airmenByBd.set(digits, next);
+          changed = true;
+        }
+      }
+    };
+
+    // 1. Check legacy `baf_local_db_v3__office_${safeCode}`
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const rawLegacy = window.localStorage.getItem(`baf_local_db_v3__office_${safeCode}`);
+        if (rawLegacy) {
+          const parsedLegacy = JSON.parse(rawLegacy);
+          if (parsedLegacy && typeof parsedLegacy === 'object') {
+            if (Array.isArray(parsedLegacy.airmen)) {
+              parsedLegacy.airmen.forEach((a: any) => mergeCandidateIntoAirmen(a, 'Approved Office Registration'));
+            }
+            if (Array.isArray(parsedLegacy.detailedUsers)) {
+              parsedLegacy.detailedUsers.forEach((u: any) => mergeCandidateIntoAirmen(u, 'Office User Management'));
+            }
+          }
+        }
+      } catch {}
+
+      // 2. Check scoped `baf_detailed_user_logins__office_${safeCode}`
+      try {
+        const rawScopedUsers = window.localStorage.getItem(getActiveDetailedUsersStorageKey());
+        if (rawScopedUsers) {
+          const parsedUsers = JSON.parse(rawScopedUsers);
+          if (Array.isArray(parsedUsers)) {
+            parsedUsers.forEach((u: any) => mergeCandidateIntoAirmen(u, 'Office User Management'));
+          }
+        }
+      } catch {}
+    }
+
+    // 3. Check `targetDb.detailedUsers`
+    if (Array.isArray(targetDb.detailedUsers)) {
+      targetDb.detailedUsers.forEach((u: any) => mergeCandidateIntoAirmen(u, 'Office User Management'));
+    }
+
+    // 4. Check `getPendingOfficeRequestsLocal()` for this officeCode
+    try {
+      const reqs = getPendingOfficeRequestsLocal();
+      reqs.forEach((r) => {
+        if (
+          r &&
+          r.status !== 'REJECTED' &&
+          String(r.officeCode || '').toUpperCase().trim() === officeCode
+        ) {
+          mergeCandidateIntoAirmen(r, `Approved Office Registration (${r.officeName})`);
+        }
+      });
+    } catch {}
+
+    // 5. Check `getGlobalUserOfficeMap()` for this officeCode
+    try {
+      const globalMap = getGlobalUserOfficeMap();
+      Object.values(globalMap).forEach((entry) => {
+        if (
+          entry &&
+          !entry.isDefault155 &&
+          !entry.isPostedOut &&
+          entry.active !== false &&
+          String(entry.officeCode || '').toUpperCase().trim() === officeCode
+        ) {
+          mergeCandidateIntoAirmen(entry, `Office Directory (${entry.officeName})`);
+        }
+      });
+    } catch {}
+
+    if (changed) {
+      targetDb.airmen = normalizeAirmenSeniority(Array.from(airmenByBd.values()));
+      if (saveIfChanged) {
+        this.saveToStorage(targetDb, true, true, true);
+      }
+    }
+    return changed;
+  }
+
   // --- AIRMEN CRUD ---
   public getAirmen(filters?: { flight?: string; rank?: string; search?: string }): Airman[] {
+    if (!isDefault155UasuOffice() && this.db.airmen.length === 0) {
+      this.reconcileCustomOfficeAirmenAndUsers(this.db, true);
+    }
     let list = this.db.airmen.filter((a) => {
       const digits = String(a.bdNo || a.id || '').replace(/\D/g, '');
       return digits !== '48456' && a.role !== 'master_owner' && a.isProtected !== true;
     });
     if (filters?.flight && filters.flight !== 'Overall') {
-      list = list.filter((a) => a.flightName === filters.flight);
+      const officeHasFlights = doesOfficeHaveFlights(list);
+      list = list.filter((a) =>
+        officeHasFlights
+          ? a.flightName === filters.flight
+          : a.flightName === filters.flight || a.trade === filters.flight
+      );
     }
     if (filters?.rank && filters.rank !== 'All') {
       list = list.filter((a) => a.rank === filters.rank);
@@ -2541,6 +2771,7 @@ export class LocalDatabaseEngine {
       list = list.filter(
         (a) =>
           a.name.toLowerCase().includes(q) ||
+          (a.fullName || '').toLowerCase().includes(q) ||
           a.bdNo.toLowerCase().includes(q) ||
           a.code.toLowerCase().includes(q) ||
           a.trade.toLowerCase().includes(q) ||
@@ -3547,9 +3778,16 @@ export class LocalDatabaseEngine {
       return true;
     });
 
-    const filteredAirmen = sortAirmenBySeniority(selectedFlight === 'Overall' 
-      ? dateActiveAirmen 
-      : dateActiveAirmen.filter((a) => a.flightName === selectedFlight));
+    const officeHasFlightsForParade = doesOfficeHaveFlights(allAirmen);
+    const filteredAirmen = sortAirmenBySeniority(
+      selectedFlight === 'Overall'
+        ? dateActiveAirmen
+        : dateActiveAirmen.filter((a) =>
+            officeHasFlightsForParade
+              ? a.flightName === selectedFlight
+              : a.flightName === selectedFlight || a.trade === selectedFlight
+          )
+    );
 
     let onParade = 0;
     let onDuty = 0;
@@ -4075,11 +4313,21 @@ export class LocalDatabaseEngine {
       };
     });
 
-    const flights: FlightName[] = ['Avionics', 'Mechanics', 'GCS', 'Admin'];
-    const flightBreakdown = {} as Record<FlightName, any>;
+    const flights: string[] = officeHasFlightsForParade
+      ? ['Avionics', 'Mechanics', 'GCS', 'Admin']
+      : Array.from(
+          new Set(
+            dateActiveAirmen
+              .map((a) => String(a.trade || '').trim())
+              .filter(Boolean)
+          )
+        );
+    const flightBreakdown = {} as Record<string, any>;
 
     flights.forEach((fl) => {
-      const flAirmen = dateActiveAirmen.filter((a) => a.flightName === fl);
+      const flAirmen = dateActiveAirmen.filter((a) =>
+        officeHasFlightsForParade ? a.flightName === fl : a.trade === fl
+      );
       let flParade = 0;
       let flDuty = 0;
       let flLeave = 0;

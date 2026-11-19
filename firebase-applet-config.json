@@ -1,12 +1,12 @@
 {
-  "projectId": "steady-weft-wf6jr",
-  "appId": "1:161720602695:web:99cedddfbbcf813458e162",
-  "apiKey": "AIzaSyDW_SR5VqwbG-zLH28CLjLg9aaQE-iB2CI",
-  "authDomain": "steady-weft-wf6jr.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-155uasubaf-80277d05-254c-4645-916d-5b54fa108313",
-  "storageBucket": "steady-weft-wf6jr.firebasestorage.app",
-  "messagingSenderId": "161720602695",
+  "projectId": "gen-lang-client-0792290659",
+  "appId": "1:1048779729408:web:0e39e5c31d5552fd6746e5",
+  "apiKey": "AIzaSyDf2hvt5Pt8AwWSmkV_1yvSCQCpLtlKsiA",
+  "authDomain": "gen-lang-client-0792290659.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-officemanagement-bc958b3c-7417-4832-997d-fd43aff3b273",
+  "storageBucket": "gen-lang-client-0792290659.firebasestorage.app",
+  "messagingSenderId": "1048779729408",
   "measurementId": "",
-  "oAuthClientId": "161720602695-es6tllkdp6j48r7o9cccekjbq23rc7bl.apps.googleusercontent.com",
+  "oAuthClientId": "1048779729408-bd1ujdmicrfg4qg3uvmkjghsli0p5u0j.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

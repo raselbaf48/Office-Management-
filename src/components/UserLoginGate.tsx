@@ -344,10 +344,26 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const displayedOfficeSubtitle = useMemo(() => {
     if (!cleanTypedBd) return 'Centralized Multi-Office Management System';
     if (isMasterUserTyped && selectedMasterOffice) {
-      return `${selectedMasterOffice.officeBase || 'BAF BASE ZHR'} • ${selectedMasterOffice.officeSlogan || 'Master Office Selection'}`;
+      const isSel155 =
+        String(selectedMasterOffice.officeCode || '').toUpperCase().trim() === '155-UASU' ||
+        String(selectedMasterOffice.officeCode || '').toUpperCase().trim() === '155UASU';
+      const rawSlogan = String(selectedMasterOffice.officeSlogan || '').trim();
+      const cleanSlogan =
+        !isSel155 && rawSlogan === 'Intel • Surveillance • Strike' ? '' : rawSlogan;
+      return cleanSlogan
+        ? `${selectedMasterOffice.officeBase || 'BAF BASE ZHR'} • ${cleanSlogan}`
+        : selectedMasterOffice.officeBase || 'BAF BASE ZHR';
     }
     if (matchedUserOffice) {
-      return `${matchedUserOffice.officeBase || 'BAF BASE ZHR'} • ${matchedUserOffice.officeSlogan || 'Intel • Surveillance • Strike'}`;
+      const rawSlogan = String(matchedUserOffice.officeSlogan || '').trim();
+      const cleanSlogan = matchedUserOffice.isDefault155
+        ? rawSlogan || 'Intel • Surveillance • Strike'
+        : rawSlogan === 'Intel • Surveillance • Strike'
+          ? ''
+          : rawSlogan;
+      return cleanSlogan
+        ? `${matchedUserOffice.officeBase || 'BAF BASE ZHR'} • ${cleanSlogan}`
+        : matchedUserOffice.officeBase || 'BAF BASE ZHR';
     }
     if (matchedPendingRequest) {
       return `${matchedPendingRequest.officeBase || 'BAF BASE ZHR'} • Pending Master Admin Approval`;
@@ -452,14 +468,22 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         localDb.switchActiveOfficeWorkspace(false);
       } catch {}
     } else if (office.firebaseConfig) {
+      const rawSlogan = String(
+        office.officeSlogan ?? office.firebaseConfig?.officeSlogan ?? ''
+      ).trim();
+      const cleanSlogan =
+        rawSlogan === 'Intel • Surveillance • Strike' ? '' : rawSlogan;
       saveCustomOfficeConfig(
         {
           officeName: office.officeName,
           officeLogo: office.officeLogo || '/155-uasu-baf-logo.png',
-          officeSlogan: office.officeSlogan || 'Intel • Surveillance • Strike',
+          officeSlogan: cleanSlogan,
           officeBase: office.officeBase || 'BAF BASE ZHR',
           officeCode: code,
-          firebaseConfig: office.firebaseConfig,
+          firebaseConfig: {
+            ...office.firebaseConfig,
+            officeSlogan: cleanSlogan,
+          },
           configuredAt: new Date().toISOString(),
           adminUserId: MASTER_OWNER_USER_ID,
         },
@@ -468,7 +492,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       updateActiveOfficeProfile({
         officeName: office.officeName,
         officeLogo: office.officeLogo || '/155-uasu-baf-logo.png',
-        officeSlogan: office.officeSlogan || 'Intel • Surveillance • Strike',
+        officeSlogan: cleanSlogan,
         officeBase: office.officeBase || 'BAF BASE ZHR',
       });
       try {
@@ -980,7 +1004,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         officeName: resolvedRegUnitName,
         wing: '',
         officeBase: regBase.trim(),
-        officeSlogan: regSlogan.trim() || 'Intel • Surveillance • Strike',
+        officeSlogan: regSlogan.trim(),
         officeLogo: regLogo || '/office-management-logo.png?v=15',
         bdNo: cleanRegBdDigits,
         rank: 'LAC' as Rank,

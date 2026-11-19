@@ -385,8 +385,15 @@ export function buildAutoCloudFirebaseConfig(
 export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null {
   if (!raw || typeof raw !== 'object') return null;
   const officeName = String(raw.officeName || '').trim();
-  const fb = raw.firebaseConfig || firebaseConfigData;
-  if (!officeName || !fb || typeof fb !== 'object') return null;
+  const rawFb = raw.firebaseConfig || firebaseConfigData;
+  if (!officeName || !rawFb || typeof rawFb !== 'object') return null;
+
+  // Automatically migrate any config referencing the retired Firebase project/database to the newly linked firebaseConfigData
+  const isRetiredDefaultProject =
+    rawFb.projectId === 'gen-lang-client-0251225792' ||
+    rawFb.firestoreDatabaseId === 'ai-studio-155uasubaf-80277d05-254c-4645-916d-5b54fa108313';
+  const fb = isRetiredDefaultProject ? { ...rawFb, ...firebaseConfigData } : rawFb;
+
   const apiKey = String(fb.apiKey || firebaseConfigData.apiKey || '').trim();
   const projectId = String(fb.projectId || firebaseConfigData.projectId || '').trim();
   if (!apiKey || !projectId) return null;
@@ -398,10 +405,10 @@ export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null
     .trim();
   const joinPin = raw.joinPin || fb.joinPin ? String(raw.joinPin || fb.joinPin).trim() : undefined;
 
+  const is155Code = officeCode === '155-UASU' || officeCode === '155UASU';
+  const rawSlogan = String(raw.officeSlogan ?? fb.officeSlogan ?? '').trim();
   const officeSlogan =
-    raw.officeSlogan || fb.officeSlogan
-      ? String(raw.officeSlogan || fb.officeSlogan).trim()
-      : undefined;
+    !is155Code && rawSlogan === 'Intel • Surveillance • Strike' ? '' : rawSlogan;
   const officeBase =
     raw.officeBase || fb.officeBase
       ? String(raw.officeBase || fb.officeBase).trim()
@@ -410,7 +417,7 @@ export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null
   return {
     officeName,
     officeLogo: String(raw.officeLogo || '/155-uasu-baf-logo.png').trim() || '/155-uasu-baf-logo.png',
-    ...(officeSlogan ? { officeSlogan } : {}),
+    officeSlogan,
     ...(officeBase ? { officeBase } : {}),
     officeCode,
     joinPin,
@@ -426,13 +433,55 @@ export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null
         : (firebaseConfigData as any).firestoreDatabaseId,
       officeCode,
       ...(joinPin ? { joinPin } : {}),
-      ...(officeSlogan ? { officeSlogan } : {}),
+      officeSlogan,
       ...(officeBase ? { officeBase } : {}),
     },
     configuredAt: raw.configuredAt || new Date().toISOString(),
     adminUserId: raw.adminUserId ? String(raw.adminUserId).trim() : undefined,
   };
 }
+
+const LINKED_FIREBASE_TARGET_KEY = 'baf_linked_firebase_target';
+
+function ensureLinkedFirebaseTargetFresh(): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const currentTarget = `${firebaseConfigData.projectId}:${(firebaseConfigData as any).firestoreDatabaseId || '(default)'}`;
+    const savedTarget = window.localStorage.getItem(LINKED_FIREBASE_TARGET_KEY);
+    if (savedTarget === currentTarget) return;
+
+    window.localStorage.setItem(LINKED_FIREBASE_TARGET_KEY, currentTarget);
+    window.localStorage.removeItem('baf_firebase_quota_exceeded_at');
+    window.localStorage.removeItem('baf_firebase_quota_error_msg');
+
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k) continue;
+      if (
+        k.startsWith('baf_last_pull_at') ||
+        k.startsWith('baf_last_handled_revision') ||
+        k === 'baf_global_dir_last_sync_at' ||
+        k === 'baf_master_telemetry_last_sync_at' ||
+        k === 'baf_pending_req_last_sync_at'
+      ) {
+        keysToRemove.push(k);
+      }
+    }
+    keysToRemove.forEach((k) => window.localStorage.removeItem(k));
+
+    // Upgrade cached custom_office_config if it pointed to the old default Firebase project
+    const rawCustom = window.localStorage.getItem(CUSTOM_OFFICE_CONFIG_KEY);
+    if (rawCustom) {
+      const migrated = validateCustomOfficePayload(JSON.parse(rawCustom));
+      if (migrated) {
+        window.localStorage.setItem(CUSTOM_OFFICE_CONFIG_KEY, JSON.stringify(migrated));
+      }
+    }
+  } catch {}
+}
+
+ensureLinkedFirebaseTargetFresh();
 
 export function decodeOfficeSetupPayload(input: string): CustomOfficeConfig | null {
   if (!input || typeof input !== 'string') return null;
@@ -741,10 +790,40 @@ export function clearCustomOfficeConfig(): void {
   }
 }
 
+export function sanitizeOfficeSlogan(sloganInput: unknown, isDefault155: boolean = false): string {
+  const s = String(sloganInput ?? '').trim();
+  if (isDefault155) {
+    return s || 'Intel • Surveillance • Strike';
+  }
+  if (!s || s === 'Intel • Surveillance • Strike') {
+    return '';
+  }
+  return s;
+}
+
 export function getSavedOfficeProfileOverride(): Partial<OfficeProfileData> | null {
   if (typeof window === 'undefined' || !window.localStorage) return null;
   try {
-    const raw = window.localStorage.getItem(OFFICE_PROFILE_STORAGE_KEY);
+    const custom = getCustomOfficeConfig();
+    const is155 =
+      !custom ||
+      String(custom.officeCode || custom.firebaseConfig?.officeCode || '')
+        .toUpperCase()
+        .trim() === '155-UASU' ||
+      String(custom.officeCode || custom.firebaseConfig?.officeCode || '')
+        .toUpperCase()
+        .trim() === '155UASU';
+    const key = is155
+      ? OFFICE_PROFILE_STORAGE_KEY
+      : `${OFFICE_PROFILE_STORAGE_KEY}__office_${String(
+          custom.officeCode ||
+            custom.firebaseConfig?.officeCode ||
+            generateOfficeCodeFromName(custom.officeName || 'Office')
+        )
+          .toUpperCase()
+          .trim()
+          .replace(/[^A-Z0-9_-]/g, '_')}`;
+    const raw = window.localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return null;
@@ -772,6 +851,7 @@ export function getActiveOfficeIdentity(): {
       custom.officeCode ||
       custom.firebaseConfig?.officeCode ||
       generateOfficeCodeFromName(custom.officeName || 'Office');
+    const is155 = code.toUpperCase() === '155-UASU' || code.toUpperCase() === '155UASU';
     const resolvedName =
       (profileOverride?.officeName && String(profileOverride.officeName).trim()) ||
       custom.officeName ||
@@ -780,11 +860,11 @@ export function getActiveOfficeIdentity(): {
       (profileOverride?.officeLogo && String(profileOverride.officeLogo).trim()) ||
       custom.officeLogo ||
       '/155-uasu-baf-logo.png';
-    const resolvedSlogan =
-      (profileOverride?.officeSlogan && String(profileOverride.officeSlogan).trim()) ||
-      custom.officeSlogan ||
-      custom.firebaseConfig?.officeSlogan ||
-      'Intel • Surveillance • Strike';
+    const rawCustomSlogan =
+      profileOverride?.officeSlogan !== undefined
+        ? profileOverride.officeSlogan
+        : (custom.officeSlogan ?? custom.firebaseConfig?.officeSlogan ?? '');
+    const resolvedSlogan = sanitizeOfficeSlogan(rawCustomSlogan, is155);
     const resolvedBase =
       (profileOverride?.officeBase && String(profileOverride.officeBase).trim()) ||
       custom.officeBase ||
@@ -798,7 +878,7 @@ export function getActiveOfficeIdentity(): {
       officeCode: code,
       joinPin: custom.joinPin || custom.firebaseConfig?.joinPin,
       projectId: custom.firebaseConfig.projectId,
-      isCustom: true,
+      isCustom: !is155,
     };
   }
 
@@ -823,17 +903,22 @@ export function getActiveOfficeIdentity(): {
 
 export function updateActiveOfficeProfile(profile: Partial<OfficeProfileData>): OfficeProfileData {
   const current = getActiveOfficeIdentity();
+  const isDefault155 = !current.isCustom;
+  const rawNextSlogan =
+    profile.officeSlogan !== undefined ? profile.officeSlogan : current.officeSlogan;
   const nextProfile: OfficeProfileData = {
     officeName: String(profile.officeName ?? current.officeName ?? '155 UASU BAF').trim() || '155 UASU BAF',
     officeLogo: String(profile.officeLogo ?? current.officeLogo ?? '/155-uasu-baf-logo.png').trim() || '/155-uasu-baf-logo.png',
-    officeSlogan: String(profile.officeSlogan ?? current.officeSlogan ?? 'Intel • Surveillance • Strike').trim() || 'Intel • Surveillance • Strike',
+    officeSlogan: sanitizeOfficeSlogan(rawNextSlogan, isDefault155),
     officeBase: String(profile.officeBase ?? current.officeBase ?? 'BAF BASE ZHR').trim() || 'BAF BASE ZHR',
   };
 
   if (typeof window !== 'undefined' && window.localStorage) {
+    const scopedProfileKey = getOfficeScopedStorageKey(OFFICE_PROFILE_STORAGE_KEY);
+    const scopedLogoKey = getOfficeScopedStorageKey('baf_custom_unit_logo');
     try {
-      window.localStorage.setItem(OFFICE_PROFILE_STORAGE_KEY, JSON.stringify(nextProfile));
-      window.localStorage.setItem('baf_custom_unit_logo', nextProfile.officeLogo);
+      window.localStorage.setItem(scopedProfileKey, JSON.stringify(nextProfile));
+      window.localStorage.setItem(scopedLogoKey, nextProfile.officeLogo);
     } catch {}
 
     const custom = getCustomOfficeConfig();
@@ -1524,40 +1609,45 @@ export function getRealtimeOfficeUserCount(officeCodeInput: string, fallbackCoun
     return !clean || clean === '48456' || clean === masterId || clean === '53539919';
   };
 
-  // 1. Check local database airmen (`baf_local_db_v3` or `baf_local_db_v3__office_${safeCode}`)
-  const dbKey = is155 ? 'baf_local_db_v3' : `baf_local_db_v3__office_${safeCode}`;
+  // 1. Check local database airmen (`baf_155_uasu_v2_db` / `baf_local_db_v3` or office-scoped equivalents)
+  const candidateDbKeys = is155
+    ? ['baf_155_uasu_v2_db', 'baf_local_db_v3']
+    : [`baf_155_uasu_v2_db__office_${safeCode}`, `baf_local_db_v3__office_${safeCode}`];
 
-  try {
-    const rawDb = getRawLocalStorageItem(dbKey);
-    if (rawDb) {
-      const parsedDb = JSON.parse(rawDb);
-      if (parsedDb && Array.isArray(parsedDb.airmen)) {
-        // If 155-UASU has any leaked foreign office airmen, clean them out of baf_local_db_v3
-        let cleanedList = parsedDb.airmen;
-        if (is155) {
-          const filteredForeign = cleanedList.filter((a: any) => !isForeignOfficeLeakedInto155(a));
-          if (filteredForeign.length !== cleanedList.length) {
-            cleanedList = filteredForeign;
-            try {
-              parsedDb.airmen = cleanedList;
-              setRawLocalStorageItem(dbKey, JSON.stringify(parsedDb));
-            } catch {}
+  for (const dbKey of candidateDbKeys) {
+    try {
+      const rawDb = getRawLocalStorageItem(dbKey);
+      if (rawDb) {
+        const parsedDb = JSON.parse(rawDb);
+        if (parsedDb && Array.isArray(parsedDb.airmen) && parsedDb.airmen.length > 0) {
+          let cleanedList = parsedDb.airmen;
+          if (is155) {
+            const filteredForeign = cleanedList.filter((a: any) => !isForeignOfficeLeakedInto155(a));
+            if (filteredForeign.length !== cleanedList.length) {
+              cleanedList = filteredForeign;
+              try {
+                parsedDb.airmen = cleanedList;
+                setRawLocalStorageItem(dbKey, JSON.stringify(parsedDb));
+              } catch {}
+            }
+          }
+
+          const seenBds = new Set<string>();
+          const activeAirmen = cleanedList.filter((a: any) => {
+            if (!a || isAirmanPostedOut(a) || isMasterBd(a.bdNo)) return false;
+            if (is155 && isForeignOfficeLeakedInto155(a)) return false;
+            const cleanBd = String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+            if (!cleanBd || seenBds.has(cleanBd)) return false;
+            seenBds.add(cleanBd);
+            return true;
+          });
+          if (activeAirmen.length > 0) {
+            return activeAirmen.length;
           }
         }
-
-        const seenBds = new Set<string>();
-        const activeAirmen = cleanedList.filter((a: any) => {
-          if (!a || isAirmanPostedOut(a) || isMasterBd(a.bdNo)) return false;
-          if (is155 && isForeignOfficeLeakedInto155(a)) return false;
-          const cleanBd = String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
-          if (!cleanBd || seenBds.has(cleanBd)) return false;
-          seenBds.add(cleanBd);
-          return true;
-        });
-        return activeAirmen.length;
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
   // 2. Check scoped detailed user logins (`baf_detailed_user_logins__office_${safeCode}`)
   if (!is155) {
@@ -2018,10 +2108,12 @@ export function registerUsersInGlobalOfficeDirectory(
     officeIdentityOverride?.officeName || activeIdentity.officeName || '155 UASU BAF';
   const officeLogo =
     officeIdentityOverride?.officeLogo || activeIdentity.officeLogo || '/155-uasu-baf-logo.png';
-  const officeSlogan =
-    officeIdentityOverride?.officeSlogan ||
-    activeIdentity.officeSlogan ||
-    'Intel • Surveillance • Strike';
+  const officeSlogan = sanitizeOfficeSlogan(
+    officeIdentityOverride?.officeSlogan !== undefined
+      ? officeIdentityOverride.officeSlogan
+      : activeIdentity.officeSlogan,
+    isDefault155
+  );
   const officeBase =
     officeIdentityOverride?.officeBase || activeIdentity.officeBase || 'BAF BASE ZHR';
   const resolvedConfig =
@@ -2139,30 +2231,32 @@ export function isUserPostedOutInOfficeStorage(
     .trim()
     .replace(/[^A-Z0-9_-]/g, '_');
 
-  const checkDbKey = isDefault155 || safeCode === '155-UASU' || safeCode === '155_UASU'
-    ? 'baf_local_db_v3'
-    : `baf_local_db_v3__office_${safeCode}`;
+  const checkDbKeys =
+    isDefault155 || safeCode === '155-UASU' || safeCode === '155_UASU'
+      ? ['baf_155_uasu_v2_db', 'baf_local_db_v3']
+      : [`baf_155_uasu_v2_db__office_${safeCode}`, `baf_local_db_v3__office_${safeCode}`];
 
-  try {
-    const rawDb = getRawLocalStorageItem(checkDbKey);
-    if (rawDb) {
-      const parsedDb = JSON.parse(rawDb);
-      if (parsedDb && Array.isArray(parsedDb.airmen)) {
-        const matches = parsedDb.airmen.filter((a: any) => {
-          const aBd = String(a.bdNo || '')
-            .replace(/^BD\/?/i, '')
-            .replace(/[^0-9]/g, '')
-            .trim();
-          return aBd === cleanBd;
-        });
-        if (matches.length > 0) {
-          // If any matching record is active, they are NOT posted out in this office
-          const hasActive = matches.some((m: any) => !isAirmanPostedOut(m));
-          return !hasActive;
+  for (const checkDbKey of checkDbKeys) {
+    try {
+      const rawDb = getRawLocalStorageItem(checkDbKey);
+      if (rawDb) {
+        const parsedDb = JSON.parse(rawDb);
+        if (parsedDb && Array.isArray(parsedDb.airmen)) {
+          const matches = parsedDb.airmen.filter((a: any) => {
+            const aBd = String(a.bdNo || '')
+              .replace(/^BD\/?/i, '')
+              .replace(/[^0-9]/g, '')
+              .trim();
+            return aBd === cleanBd;
+          });
+          if (matches.length > 0) {
+            const hasActive = matches.some((m: any) => !isAirmanPostedOut(m));
+            return !hasActive;
+          }
         }
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
   if ((isDefault155 || safeCode === '155-UASU') && Array.isArray(fallbackAirmen) && fallbackAirmen.length > 0) {
     const fMatches = fallbackAirmen.filter((a: any) => {
@@ -2433,10 +2527,10 @@ export function findOfficeByUserId(
               prof?.officeName || regOffice?.officeName || safeCode.replace(/_/g, ' ');
             const officeLogo =
               prof?.officeLogo || regOffice?.officeLogo || '/155-uasu-baf-logo.png';
-            const officeSlogan =
-              prof?.officeSlogan ||
-              regOffice?.officeSlogan ||
-              'Intel • Surveillance • Strike';
+            const officeSlogan = sanitizeOfficeSlogan(
+              prof?.officeSlogan ?? regOffice?.officeSlogan ?? '',
+              false
+            );
             const officeBase =
               prof?.officeBase || regOffice?.officeBase || 'BAF BASE ZHR';
             const fbCfg =
@@ -2605,17 +2699,18 @@ export function activateMatchedOfficeForUser(match: GlobalUserOfficeEntry): bool
   const fbConfig =
     match.officeConfig?.firebaseConfig ||
     buildAutoCloudFirebaseConfig(match.officeName, targetCode);
+  const cleanSlogan = sanitizeOfficeSlogan(match.officeSlogan, false);
   const nextCustomConfig: CustomOfficeConfig = {
     officeName: match.officeName,
     officeLogo: match.officeLogo || '/155-uasu-baf-logo.png',
-    officeSlogan: match.officeSlogan || 'Intel • Surveillance • Strike',
+    officeSlogan: cleanSlogan,
     officeBase: match.officeBase || 'BAF BASE ZHR',
     officeCode: targetCode,
     joinPin: match.officeConfig?.joinPin,
     firebaseConfig: {
       ...fbConfig,
       officeCode: targetCode,
-      officeSlogan: match.officeSlogan || 'Intel • Surveillance • Strike',
+      officeSlogan: cleanSlogan,
       officeBase: match.officeBase || 'BAF BASE ZHR',
     },
     configuredAt: match.officeConfig?.configuredAt || new Date().toISOString(),
@@ -2627,7 +2722,7 @@ export function activateMatchedOfficeForUser(match: GlobalUserOfficeEntry): bool
   updateActiveOfficeProfile({
     officeName: match.officeName,
     officeLogo: match.officeLogo || '/155-uasu-baf-logo.png',
-    officeSlogan: match.officeSlogan || 'Intel • Surveillance • Strike',
+    officeSlogan: cleanSlogan,
     officeBase: match.officeBase || 'BAF BASE ZHR',
   });
   return switched;
@@ -2708,10 +2803,10 @@ export async function syncGlobalUserOfficeMapFromCloud(force: boolean = false): 
               const officeCode = matchedOffice?.officeCode || safeCode;
               const officeName = matchedOffice?.officeName || safeCode.replace(/_/g, ' ');
               const officeLogo = matchedOffice?.officeLogo || '/155-uasu-baf-logo.png';
-              const officeSlogan =
-                matchedOffice?.officeSlogan ||
-                matchedOffice?.firebaseConfig?.officeSlogan ||
-                'Intel • Surveillance • Strike';
+              const officeSlogan = sanitizeOfficeSlogan(
+                matchedOffice?.officeSlogan ?? matchedOffice?.firebaseConfig?.officeSlogan ?? '',
+                false
+              );
               const officeBase =
                 matchedOffice?.officeBase ||
                 matchedOffice?.firebaseConfig?.officeBase ||
@@ -2966,9 +3061,7 @@ export async function submitOfficeRegistrationRequest(input: {
     officeCode,
     wing: String(input.wing || '').trim(),
     officeBase: String(input.officeBase || 'BAF BASE ZHR').trim() || 'BAF BASE ZHR',
-    officeSlogan:
-      String(input.officeSlogan || 'Intel • Surveillance • Strike').trim() ||
-      'Intel • Surveillance • Strike',
+    officeSlogan: sanitizeOfficeSlogan(input.officeSlogan, false),
     officeLogo:
       String(input.officeLogo || '/155-uasu-baf-logo.png').trim() || '/155-uasu-baf-logo.png',
     bdNo: cleanBd,
@@ -3021,7 +3114,7 @@ export async function approveOfficeRegistrationRequest(
   const officeProfilePayload: OfficeProfileData = {
     officeName: req.officeName,
     officeLogo: req.officeLogo || '/155-uasu-baf-logo.png',
-    officeSlogan: req.officeSlogan || 'Intel • Surveillance • Strike',
+    officeSlogan: sanitizeOfficeSlogan(req.officeSlogan, false),
     officeBase: req.officeBase || 'BAF BASE ZHR',
   };
   setRawLocalStorageItem(
@@ -3030,7 +3123,7 @@ export async function approveOfficeRegistrationRequest(
   );
 
   // 2. Build Biodata Register (`Airman`) & User Management (`DetailedUserLogin`) records
-  const airmanId = `airman-${cleanBd}`;
+  const airmanId = `BD/${cleanBd}`;
   const shortCode =
     displaySurname
       .replace(/[^a-zA-Z]/g, '')
@@ -3047,9 +3140,14 @@ export async function approveOfficeRegistrationRequest(
     fullName: displayFullName,
     name: displaySurname,
     trade: req.trade || 'Radio Fitt',
+    bloodGroup: '',
+    email: '',
+    presentAddress: req.officeBase || 'BAF BASE ZHR',
+    permanentAddress: '',
     addressBlock: req.officeBase || 'BAF BASE ZHR',
     mobileNo: req.contactNo || '',
-    flightName: req.flightName || '',
+    postingDate: nowIso.slice(0, 10),
+    flightName: '',
     remarks: `Approved Office Registration (${req.officeName})`,
     active: true,
     sqn: req.officeName,
@@ -3092,7 +3190,7 @@ export async function approveOfficeRegistrationRequest(
     name: displaySurname,
     fullName: displayFullName,
     mobileNo: req.contactNo || '',
-    flightName: req.flightName || '',
+    flightName: '',
     trade: req.trade || 'Radio Fitt',
     role: userRole,
     pin: userPin,
@@ -3124,11 +3222,12 @@ export async function approveOfficeRegistrationRequest(
   const updatedOfficeUsers = [masterUserRecord, requesterUserRecord, ...filteredUsers];
   setRawLocalStorageItem(scopedUsersKey, JSON.stringify(updatedOfficeUsers));
 
-  // 4. Write Scoped Local Database (`baf_local_db_v3__office_${safeCode}`) for Biodata Register
-  const scopedDbKey = `baf_local_db_v3__office_${safeCode}`;
+  // 4. Write Scoped Local Database (`baf_155_uasu_v2_db__office_${safeCode}` & `baf_local_db_v3__office_${safeCode}`) for Biodata Register, Nominal Roll, Duty Ratio Matrix, Parade State, etc.
+  const primaryScopedDbKey = `baf_155_uasu_v2_db__office_${safeCode}`;
+  const legacyScopedDbKey = `baf_local_db_v3__office_${safeCode}`;
   let officeDbObj: any = {
     airmen: [newAirmanRecord],
-    assignments: [],
+    assignments: {},
     leaves: [],
     tdyRecords: [],
     deployments: [],
@@ -3143,7 +3242,8 @@ export async function approveOfficeRegistrationRequest(
     lastUpdated: Date.now(),
   };
   try {
-    const rawDb = getRawLocalStorageItem(scopedDbKey);
+    const rawDb =
+      getRawLocalStorageItem(primaryScopedDbKey) || getRawLocalStorageItem(legacyScopedDbKey);
     if (rawDb) {
       const parsedDb = JSON.parse(rawDb);
       if (parsedDb && typeof parsedDb === 'object') {
@@ -3151,9 +3251,16 @@ export async function approveOfficeRegistrationRequest(
         const otherAirmen = existingAirmen.filter(
           (a: any) => String(a.bdNo || '').replace(/^BD\/?/i, '').trim() !== cleanBd
         );
+        const safeAssignments =
+          parsedDb.assignments &&
+          typeof parsedDb.assignments === 'object' &&
+          !Array.isArray(parsedDb.assignments)
+            ? parsedDb.assignments
+            : {};
         officeDbObj = {
           ...parsedDb,
           airmen: [newAirmanRecord, ...otherAirmen],
+          assignments: safeAssignments,
           detailedUsers: updatedOfficeUsers,
           settings: {
             ...(parsedDb.settings || {}),
@@ -3164,7 +3271,8 @@ export async function approveOfficeRegistrationRequest(
       }
     }
   } catch {}
-  setRawLocalStorageItem(scopedDbKey, JSON.stringify(officeDbObj));
+  setRawLocalStorageItem(primaryScopedDbKey, JSON.stringify(officeDbObj));
+  setRawLocalStorageItem(legacyScopedDbKey, JSON.stringify(officeDbObj));
 
   // 5. Sync Approved Office, Biodata Register & User Management to Local Registry & Firestore (`masterDbInstance`)
   const fbConfig = {

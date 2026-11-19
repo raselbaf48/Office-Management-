@@ -203,7 +203,7 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
           <Search className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
           <input
             type="text"
-            placeholder="Search Name, BD No, Trade, Flight..."
+            placeholder={officeHasFlights ? "Search Name, BD No, Trade, Flight..." : "Search Name, BD No, Trade..."}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full pl-9 pr-3 py-2 text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-500 font-medium"

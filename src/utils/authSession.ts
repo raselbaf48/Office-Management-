@@ -1112,19 +1112,42 @@ export const changeUserRole = (bdNo: string, newRole: UserLoginRole): DetailedUs
 };
 
 
-export const updateUserDetails = (bdNo: string, updates: { name?: string, rank?: string, flightName?: string, mobileNo?: string }): DetailedUserLogin | null => {
-  const clean = (bdNo || "").replace(/^BD\/?/i, '').trim().toLowerCase();
+export const updateUserDetails = (
+  bdNo: string,
+  updates: { name?: string; fullName?: string; rank?: string; trade?: string; flightName?: string; mobileNo?: string }
+): DetailedUserLogin | null => {
+  const clean = (bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase();
   if (isMasterProtectedUser(clean)) return null;
   const current = getDetailedUsers();
   const idx = current.findIndex((u) => u.bdNo.toLowerCase() === clean);
-  
+
   if (idx === -1) return null;
 
   if (updates.name !== undefined) current[idx].name = updates.name;
+  if (updates.fullName !== undefined) (current[idx] as any).fullName = updates.fullName;
   if (updates.rank !== undefined) current[idx].rank = updates.rank;
+  if (updates.trade !== undefined) current[idx].trade = updates.trade;
   if (updates.flightName !== undefined) current[idx].flightName = updates.flightName;
   if (updates.mobileNo !== undefined) current[idx].mobileNo = updates.mobileNo;
-  
+
   saveDetailedUsers(current);
+
+  try {
+    const cleanDigits = clean.replace(/\D/g, '');
+    if (cleanDigits) {
+      const airmanUpdates: Partial<Airman> = {};
+      if (updates.name !== undefined) airmanUpdates.name = updates.name;
+      if (updates.fullName !== undefined) airmanUpdates.fullName = updates.fullName;
+      if (updates.rank !== undefined) airmanUpdates.rank = updates.rank as any;
+      if (updates.trade !== undefined) airmanUpdates.trade = updates.trade;
+      if (updates.flightName !== undefined) airmanUpdates.flightName = updates.flightName as any;
+      if (updates.mobileNo !== undefined) airmanUpdates.mobileNo = updates.mobileNo;
+      if (Object.keys(airmanUpdates).length > 0) {
+        localDb.updateAirman(`BD/${cleanDigits}`, airmanUpdates).catch(() => {});
+      }
+    }
+  } catch {}
+
   return current[idx];
 };
+

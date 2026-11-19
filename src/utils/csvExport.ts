@@ -539,6 +539,7 @@ export function exportAirmenExcel(
   filename?: string
 ) {
   const wb = XLSX.utils.book_new();
+  const officeHasFlights = doesOfficeHaveFlights(airmen);
   const headers = [
     'Ser',
     'BD No',
@@ -546,7 +547,7 @@ export function exportAirmenExcel(
     'Full Name',
     'Surname',
     'Trade',
-    'Flight'
+    ...(officeHasFlights ? ['Flight'] : []),
   ];
 
   if (variant === 'biodata') {
@@ -571,7 +572,7 @@ export function exportAirmenExcel(
       a.fullName || a.name || '',
       a.name || a.fullName || '',
       a.trade || '',
-      a.flightName || ''
+      ...(officeHasFlights ? [a.flightName || ''] : []),
     ];
 
     if (variant === 'biodata') {
@@ -725,9 +726,16 @@ export function exportAirmenExcel(
 }
 
 export function exportAirmenTemplateExcel(
-  filename = 'BAF_155_UASU_Airmen_Biodata_Template.xlsx'
+  filename?: string
 ) {
   const wb = XLSX.utils.book_new();
+  const officeHasFlights = doesOfficeHaveFlights();
+  const activeOfficeName = (getActiveOfficeIdentity().officeName || 'BAF_Office').replace(/[^a-zA-Z0-9_-]+/g, '_');
+  const defaultTemplateFilename = officeHasFlights
+    ? 'BAF_155_UASU_Airmen_Biodata_Template.xlsx'
+    : `BAF_${activeOfficeName}_Airmen_Biodata_Template.xlsx`;
+  const effectiveFilename = filename || defaultTemplateFilename;
+
   const headers = [
     'Ser',
     'BD No',
@@ -735,7 +743,7 @@ export function exportAirmenTemplateExcel(
     'Full Name',
     'Surname',
     'Trade',
-    'Flight',
+    ...(officeHasFlights ? ['Flight'] : []),
     'Blood Group',
     'Present Address',
     'Permanent Address',
@@ -743,17 +751,26 @@ export function exportAirmenTemplateExcel(
     'Dt of Posting',
   ];
 
-  const sampleRows: any[][] = [
-    ['1', '478546', 'Sgt', 'Md Sazzad Hossain', 'Sazzad', 'Afr Fitt', 'Mechanics', 'B+', "Sgt's Mess Block 05", 'Mirpur-10, Dhaka', '01712345678', new Date(Date.UTC(2022, 0, 12))],
-    ['2', '489123', 'Cpl', 'Russel Ahmed', 'Russel', 'Eng Fitt', 'Mechanics', 'O+', "Airmen's Mess Block 08", 'Sadar, Bogura', '01812345678', new Date(Date.UTC(2023, 5, 15))],
-    ['3', '495678', 'LAC', 'Md Anowar Hossain', 'Anowar', 'E&I Fitt', 'Avionics', 'A+', 'Svc Qtr D-14', 'Kotwali, Chattogram', '01912345678', new Date(Date.UTC(2023, 10, 1))],
-    ['4', '498901', 'AC', 'Rakib Hasan', 'Rakib', 'Radio Fitt', 'Avionics', 'AB+', 'Outside Base: Agrabad', 'Gouripur, Mymensingh', '01612345678', new Date(Date.UTC(2024, 1, 10))],
-    ['5', '499120', 'AC', 'Tanvir Ahmed', 'Tanvir', 'Armt Fitt', 'Mechanics', 'O+', "Airmen's Mess Block 02", 'Sadar, Jashore', '01798765432', new Date(Date.UTC(2024, 2, 18))],
-  ];
+  const sampleRows: any[][] = officeHasFlights
+    ? [
+        ['1', '478546', 'Sgt', 'Md Sazzad Hossain', 'Sazzad', 'Afr Fitt', 'Mechanics', 'B+', "Sgt's Mess Block 05", 'Mirpur-10, Dhaka', '01712345678', new Date(Date.UTC(2022, 0, 12))],
+        ['2', '489123', 'Cpl', 'Russel Ahmed', 'Russel', 'Eng Fitt', 'Mechanics', 'O+', "Airmen's Mess Block 08", 'Sadar, Bogura', '01812345678', new Date(Date.UTC(2023, 5, 15))],
+        ['3', '495678', 'LAC', 'Md Anowar Hossain', 'Anowar', 'E&I Fitt', 'Avionics', 'A+', 'Svc Qtr D-14', 'Kotwali, Chattogram', '01912345678', new Date(Date.UTC(2023, 10, 1))],
+        ['4', '498901', 'AC', 'Rakib Hasan', 'Rakib', 'Radio Fitt', 'Avionics', 'AB+', 'Outside Base: Agrabad', 'Gouripur, Mymensingh', '01612345678', new Date(Date.UTC(2024, 1, 10))],
+        ['5', '499120', 'AC', 'Tanvir Ahmed', 'Tanvir', 'Armt Fitt', 'Mechanics', 'O+', "Airmen's Mess Block 02", 'Sadar, Jashore', '01798765432', new Date(Date.UTC(2024, 2, 18))],
+      ]
+    : [
+        ['1', '478546', 'Sgt', 'Md Sazzad Hossain', 'Sazzad', 'Afr Fitt', 'B+', "Sgt's Mess Block 05", 'Mirpur-10, Dhaka', '01712345678', new Date(Date.UTC(2022, 0, 12))],
+        ['2', '489123', 'Cpl', 'Russel Ahmed', 'Russel', 'Eng Fitt', 'O+', "Airmen's Mess Block 08", 'Sadar, Bogura', '01812345678', new Date(Date.UTC(2023, 5, 15))],
+        ['3', '495678', 'LAC', 'Md Anowar Hossain', 'Anowar', 'E&I Fitt', 'A+', 'Svc Qtr D-14', 'Kotwali, Chattogram', '01912345678', new Date(Date.UTC(2023, 10, 1))],
+        ['4', '498901', 'AC', 'Rakib Hasan', 'Rakib', 'Radio Fitt', 'AB+', 'Outside Base: Agrabad', 'Gouripur, Mymensingh', '01612345678', new Date(Date.UTC(2024, 1, 10))],
+        ['5', '499120', 'AC', 'Tanvir Ahmed', 'Tanvir', 'Armt Fitt', 'O+', "Airmen's Mess Block 02", 'Sadar, Jashore', '01798765432', new Date(Date.UTC(2024, 2, 18))],
+      ];
 
   // Provide blank pre-formatted rows for direct user entry
+  const blankFieldCount = headers.length - 1;
   for (let b = 6; b <= 30; b++) {
-    sampleRows.push([String(b), '', '', '', '', '', '', '', '', '', '', '']);
+    sampleRows.push([String(b), ...Array(blankFieldCount).fill('')]);
   }
 
   const rows: any[][] = [headers, ...sampleRows];
@@ -821,24 +838,39 @@ export function exportAirmenTemplateExcel(
     }
   }
 
-  ws['!cols'] = [
-    { wch: 6 },  // Ser
-    { wch: 12 }, // BD No
-    { wch: 10 }, // Rank
-    { wch: 25 }, // Full Name
-    { wch: 16 }, // Surname
-    { wch: 15 }, // Trade
-    { wch: 14 }, // Flight
-    { wch: 12 }, // Blood Group
-    { wch: 28 }, // Present Address
-    { wch: 28 }, // Permanent Address
-    { wch: 16 }, // Mobile No
-    { wch: 14 }, // Dt of Posting
-  ];
+  ws['!cols'] = headers.map((h) => {
+    switch (h) {
+      case 'Ser':
+        return { wch: 6 };
+      case 'BD No':
+        return { wch: 12 };
+      case 'Rank':
+        return { wch: 10 };
+      case 'Full Name':
+        return { wch: 25 };
+      case 'Surname':
+        return { wch: 16 };
+      case 'Trade':
+        return { wch: 15 };
+      case 'Flight':
+        return { wch: 14 };
+      case 'Blood Group':
+        return { wch: 12 };
+      case 'Present Address':
+      case 'Permanent Address':
+        return { wch: 28 };
+      case 'Mobile No':
+        return { wch: 16 };
+      case 'Dt of Posting':
+        return { wch: 14 };
+      default:
+        return { wch: 12 };
+    }
+  });
 
   XLSX.utils.book_append_sheet(wb, ws, 'Airmen Biodata Template');
 
-  const finalName = filename.replace(/\.(xlsx|csv)$/i, '') + '.xlsx';
+  const finalName = effectiveFilename.replace(/\.(xlsx|csv)$/i, '') + '.xlsx';
   const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
 
   const postingColIdx = headers.indexOf('Dt of Posting');

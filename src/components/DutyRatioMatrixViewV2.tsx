@@ -40,7 +40,8 @@ import { PrintableDutyRatioModal, formatDisplayDate } from "./PrintableDutyRatio
 import { AutoAllocateModal } from './AutoAllocateModal';
 import { DateNavigator } from './DateNavigator';
 import { RatioHistoryModal } from './RatioHistoryModal';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
+import { localDb } from '../services/localDatabase';
 
 interface DutyRatioMatrixViewProps {
   role?: UserRole;
@@ -157,10 +158,29 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   };
 
   const daysArray = Array.from({ length: 31 }, (_, i) => i + 1);
-  const flights: FlightName[] = ['Mechanics', 'Avionics', 'GCS', 'Admin'];
+  const [officeAirmen, setOfficeAirmen] = useState(() => localDb.getAirmen());
+  useEffect(() => {
+    const refresh = () => setOfficeAirmen(localDb.getAirmen());
+    window.addEventListener('baf_data_updated', refresh);
+    return () => window.removeEventListener('baf_data_updated', refresh);
+  }, []);
+
+  const officeHasFlights = useMemo(() => doesOfficeHaveFlights(officeAirmen), [officeAirmen]);
+  const flights: FlightName[] = useMemo(() => {
+    if (officeHasFlights) return ['Mechanics', 'Avionics', 'GCS', 'Admin'];
+    const sgtAndBelow = officeAirmen.filter(a => !['MWO', 'SWO', 'WO'].includes(a.rank));
+    const distinctTrades = Array.from(
+      new Set(
+        sgtAndBelow
+          .map(a => String(a.trade || '').trim())
+          .filter(tr => tr && tr !== '-' && tr !== 'N/A')
+      )
+    );
+    return (distinctTrades.length > 0 ? distinctTrades : ['General']) as FlightName[];
+  }, [officeHasFlights, officeAirmen]);
 
   // Flight name short codes
-  const flightShortMap: Record<FlightName, string> = {
+  const flightShortMap: Record<string, string> = {
     Mechanics: 'Mech',
     Avionics: 'AVI',
     GCS: 'GCS',
@@ -235,7 +255,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     const updated = [...matrix];
     const tableObj = { ...updated[tableIndex] };
     const flightData = { ...tableObj.data };
-    const arr = [...flightData[flight]];
+    const arr = [...(flightData[flight] || Array(31).fill(0))];
     arr[dayIndex] = num;
     flightData[flight] = arr;
     tableObj.data = flightData;
@@ -345,22 +365,30 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
   const getFlightTarget = (table: DutyRatioTable, fl: FlightName): number => {
     if (table.isDisabled) return 0;
-    if (table.flightTargets && typeof table.flightTargets[fl] === 'number') {
-      return table.flightTargets[fl]!;
+    if (table.flightTargets && typeof (table.flightTargets as any)[fl] === 'number') {
+      return (table.flightTargets as any)[fl]!;
+    }
+    if (!officeHasFlights) {
+      const idx = flights.indexOf(fl);
+      const mappedKey: FlightName = idx === 0 ? 'Mechanics' : idx === 1 ? 'Avionics' : idx === 2 ? 'GCS' : 'Admin';
+      return autoTargets?.[mappedKey]?.[table.id] ?? 0;
     }
     return autoTargets?.[fl]?.[table.id] ?? 0;
   };
 
-  const flightTotalsOverall: Record<FlightName, number> = {
+  const flightTotalsOverall: Record<string, number> = {
     Mechanics: 0,
     Avionics: 0,
     GCS: 0,
     Admin: 0,
   };
+  flights.forEach(fl => {
+    flightTotalsOverall[fl] = 0;
+  });
 
   matrix.filter(t => !t.isDisabled).forEach((table) => {
     flights.forEach((fl) => {
-      flightTotalsOverall[fl] += table.data[fl].reduce((s, c) => s + c, 0);
+      flightTotalsOverall[fl] = (flightTotalsOverall[fl] || 0) + (table.data?.[fl] || []).reduce((s, c) => s + (Number(c) || 0), 0);
     });
   });
 
@@ -535,10 +563,10 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white dark:bg-slate-900 p-4 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 mb-6">
               <div className="flex items-center space-x-2 text-sm font-bold text-slate-700 dark:text-slate-300">
                 <Layers className="w-4 h-4 text-indigo-500" />
-                <span>Flight Filter:</span>
+                <span>{officeHasFlights ? 'Flight Filter:' : 'Trade Filter:'}</span>
               </div>
               <div className="flex flex-wrap gap-2">
-                {['Overall', 'Mechanics', 'Avionics', 'GCS', 'Admin'].map((fl) => (
+                {['Overall', ...flights].map((fl) => (
                   <button
                     key={fl}
                     onClick={() => setSelectedFlightFilter(fl as any)}
@@ -605,12 +633,12 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                     <Info className="w-5 h-5 text-indigo-600 dark:text-indigo-400 shrink-0" />
                     <div>
                       <h4 className="font-black text-sm text-indigo-950 dark:text-indigo-200">
-                        {selectedFlightFilter === 'Overall' ? 'Overall Unit Duty Ratio Matrix' : `${selectedFlightFilter} Flight Quota & Target Info`}
+                        {selectedFlightFilter === 'Overall' ? 'Overall Unit Duty Ratio Matrix' : `${selectedFlightFilter} ${officeHasFlights ? 'Flight' : 'Trade'} Quota & Target Info`}
                       </h4>
                       <p className="text-xs text-indigo-700 dark:text-indigo-300">
                         {selectedFlightFilter === 'Overall'
-                          ? `Month Target: ${totalSlotsOverall} slots distributed across all flights`
-                          : `Allocated Total: ${flightTotalsOverall[selectedFlightFilter as FlightName]} / Target Total: ${targetFlightTotal}`}
+                          ? `Month Target: ${totalSlotsOverall} slots distributed across all ${officeHasFlights ? 'flights' : 'trades'}`
+                          : `Allocated Total: ${flightTotalsOverall[selectedFlightFilter as FlightName] || 0} / Target Total: ${targetFlightTotal}`}
                       </p>
                     </div>
                   </div>
@@ -663,7 +691,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
         {/* Existing Mapping for Overall Rendering */}
         {viewMode === 'DUTY_RATIO' && selectedFlightFilter === 'Overall' && matrix.filter(t => !t.isDisabled).map((table, tableIdx) => {
-          const tableTotal = flights.reduce((sum, fl) => sum + table.data[fl].reduce((a,b) => a+b, 0), 0);
+          const tableTotal = flights.reduce((sum, fl) => sum + (table.data?.[fl] || []).reduce((a,b) => a+b, 0), 0);
           // Keep specific styling for first tables
           let colors = {
             header: 'bg-slate-800 text-white',
@@ -743,9 +771,10 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                       {flights
                         .filter((fl) => selectedFlightFilter === 'Overall' || selectedFlightFilter === fl)
-                        .filter((fl) => !table.eligibleFlights || table.eligibleFlights.includes(fl as any))
+                        .filter((fl) => !officeHasFlights || !table.eligibleFlights || table.eligibleFlights.includes(fl as any))
                         .map((flight, flightIdx) => {
-                          const rowSum = table.data[flight].reduce((a, b) => a + b, 0);
+                          const flightArr = table.data?.[flight] || Array(31).fill(0);
+                          const rowSum = flightArr.reduce((a, b) => a + b, 0);
                           const isAltRow = flightIdx % 2 === 1;
 
                           return (
@@ -771,18 +800,18 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                               </td>
 
                               {daysArray.map((dayNum, dayIdx) => {
-                                const val = table.data[flight][dayIdx] || 0;
+                                const val = flightArr[dayIdx] || 0;
                                 const isPositive = val > 0;
                                 const isAltCol = dayNum % 2 === 0;
 
                                 // Calculate daily quota for this specific duty across all flights on this day
-                                const dutyDaySum = flights.reduce((sum, fl) => sum + (table.data[fl]?.[dayIdx] || 0), 0);
+                                const dutyDaySum = flights.reduce((sum, fl) => sum + (table.data?.[fl]?.[dayIdx] || 0), 0);
                                 let dutyDayReq = table.dailyRequirements?.[dayIdx];
                                 if (dutyDayReq === undefined) {
                                   if (table.totalRequiredDaily && (table.totalRequiredDaily * 31 === table.totalRequiredMonth)) {
                                     dutyDayReq = table.totalRequiredDaily;
                                   } else {
-                                    dutyDayReq = ['Mechanics', 'Avionics', 'GCS', 'Admin'].reduce((acc, fl) => acc + (table.data[fl as FlightName]?.[dayIdx] || 0), 0);
+                                    dutyDayReq = flights.reduce((acc, fl) => acc + (table.data?.[fl as FlightName]?.[dayIdx] || 0), 0);
                                   }
                                 }
                                 const isDayExceeded = dutyDaySum > dutyDayReq;
@@ -794,12 +823,12 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                                     onClick={() => handleToggleFlightDutyCell(table.id, flight, dayIdx)}
                                     onContextMenu={(e) => {
                                       e.preventDefault();
-                                      const cur = table.data[flight][dayIdx] || 0;
+                                      const cur = flightArr[dayIdx] || 0;
                                       handleToggleFlightDutyCell(table.id, flight, dayIdx, cur === 2 ? 0 : 2);
                                     }}
                                     onDoubleClick={(e) => {
                                       e.preventDefault();
-                                      const cur = table.data[flight][dayIdx] || 0;
+                                      const cur = flightArr[dayIdx] || 0;
                                       handleToggleFlightDutyCell(table.id, flight, dayIdx, cur === 2 ? 0 : 2);
                                     }}
                                     title={`Date ${dayNum} (${flight} - ${table.title}): Day Total ${dutyDaySum} / Required ${dutyDayReq}. Click for 1/0, Right-click or Double-click for 2`}
@@ -889,7 +918,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
                         {daysArray.map((dayNum, dayIdx) => {
                           const dailySum = flights.reduce(
-                            (sum, fl) => sum + (table.data[fl]?.[dayIdx] || 0),
+                            (sum, fl) => sum + (table.data?.[fl]?.[dayIdx] || 0),
                             0
                           );
                           let dailyReq = table.dailyRequirements?.[dayIdx];
@@ -897,7 +926,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                               if (table.totalRequiredDaily && (table.totalRequiredDaily * 31 === table.totalRequiredMonth)) {
                                   dailyReq = table.totalRequiredDaily;
                               } else {
-                                  dailyReq = ['Mechanics', 'Avionics', 'GCS', 'Admin'].reduce((acc, fl) => acc + (table.data[fl as FlightName]?.[dayIdx] || 0), 0);
+                                  dailyReq = flights.reduce((acc, fl) => acc + (table.data?.[fl as FlightName]?.[dayIdx] || 0), 0);
                               }
                           }
                           const isPositive = dailySum > 0;
@@ -972,25 +1001,25 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
             );
           })}
 
-          {/* Flight-wise Total Duty Summary Card */}
+          {/* Flight-wise / Trade-wise Total Duty Summary Card */}
           {viewMode === 'DUTY_RATIO' && selectedFlightFilter === 'Overall' && (
             <div className="bg-white dark:bg-slate-900 rounded-2xl border-2 border-indigo-200 dark:border-indigo-800 shadow-md overflow-hidden mt-6">
               <div className="px-4 py-3 flex items-center justify-between bg-gradient-to-r from-indigo-700 via-indigo-800 to-slate-900 text-white">
                 <div className="flex items-center space-x-2.5">
                   <Layers className="w-5 h-5 text-indigo-300" />
                   <span className="font-mono font-black text-sm tracking-wider uppercase">
-                    Flight-Wise Total Duty Summary
+                    {officeHasFlights ? 'Flight-Wise Total Duty Summary' : 'Trade-Wise Total Duty Summary'}
                   </span>
                 </div>
                 <div className="text-xs font-bold bg-white/20 px-3 py-1 rounded-lg font-mono">
-                  Total Allocated: {flights.reduce((s, fl) => s + flightTotalsOverall[fl], 0)} / {totalSlotsOverall}
+                  Total Allocated: {flights.reduce((s, fl) => s + (flightTotalsOverall[fl] || 0), 0)} / {totalSlotsOverall}
                 </div>
               </div>
               <div className="w-full overflow-x-auto">
                 <table className="w-full text-xs text-center border-collapse">
                   <thead>
                     <tr className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold border-b border-slate-200 dark:border-slate-700">
-                      <th className="p-2.5 text-left pl-4 font-bold">FLIGHT NAME</th>
+                      <th className="p-2.5 text-left pl-4 font-bold">{officeHasFlights ? 'FLIGHT NAME' : 'TRADE NAME'}</th>
                       {matrix.filter(t => !t.isDisabled).map(t => (
                         <th key={t.id} className="p-2 text-center font-bold">{t.title}</th>
                       ))}
@@ -999,19 +1028,19 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {flights.map(fl => {
-                      const totalAllocated = flightTotalsOverall[fl];
+                      const totalAllocated = flightTotalsOverall[fl] || 0;
                       const totalTarget = matrix.filter(t => !t.isDisabled).reduce((s, t) => s + getFlightTarget(t, fl), 0);
                       return (
                         <tr key={fl} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
                           <td className="p-2.5 text-left pl-4 font-bold text-slate-900 dark:text-white">
-                            {fl} Flight
+                            {officeHasFlights ? `${fl} Flight` : fl}
                           </td>
                           {matrix.filter(t => !t.isDisabled).map(t => {
-                            const val = t.data[fl]?.reduce((a, b) => a + b, 0) ?? 0;
+                            const val = t.data?.[fl]?.reduce((a, b) => a + b, 0) ?? 0;
                             const tgt = getFlightTarget(t, fl);
                             return (
                               <td key={t.id} className="p-2 text-center font-mono font-bold">
-                                {t.eligibleFlights && !t.eligibleFlights.includes(fl) ? (
+                                {officeHasFlights && t.eligibleFlights && !t.eligibleFlights.includes(fl) ? (
                                   <span className="text-slate-400">N/A</span>
                                 ) : (
                                   <span className={val === tgt ? 'text-emerald-600 dark:text-emerald-400' : 'text-indigo-600 dark:text-indigo-400'}>
@@ -1033,7 +1062,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                     <tr className="bg-slate-100 dark:bg-slate-800 font-bold border-t-2 border-slate-300 dark:border-slate-700">
                       <td className="p-2.5 text-left pl-4 font-black">TOTAL</td>
                       {matrix.filter(t => !t.isDisabled).map(t => {
-                        const sum = flights.reduce((s, fl) => s + (t.data[fl]?.reduce((a, b) => a + b, 0) ?? 0), 0);
+                        const sum = flights.reduce((s, fl) => s + (t.data?.[fl]?.reduce((a, b) => a + b, 0) ?? 0), 0);
                         return (
                           <td key={t.id} className="p-2 text-center font-mono font-black">
                             {sum}
@@ -1041,7 +1070,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                         );
                       })}
                       <td className="p-2.5 text-center font-mono font-black text-sm bg-indigo-200 dark:bg-indigo-900 text-indigo-950 dark:text-indigo-100">
-                        {flights.reduce((s, fl) => s + flightTotalsOverall[fl], 0)}
+                        {flights.reduce((s, fl) => s + (flightTotalsOverall[fl] || 0), 0)}
                       </td>
                     </tr>
                   </tbody>

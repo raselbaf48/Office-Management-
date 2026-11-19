@@ -7,6 +7,7 @@ import { exportAirmenExcel, formatShortDate } from '../utils/csvExport';
 import { FileSpreadsheet } from 'lucide-react';
 import { getSavedPreparedBy, getSavedAuthorizedBy } from './SignatureConfigModal';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
 interface PrintableNominalRollModalProps {
   airmen: Airman[];
   title?: string;
@@ -24,12 +25,16 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
     variant === 'biodata' ? 'landscape' : 'portrait'
   );
 
+  const officeIdentity = getActiveOfficeIdentity();
+  const officeHasFlights = doesOfficeHaveFlights(airmen);
+  const safeOfficeFileCode = (officeIdentity.officeName || '155_UASU_BAF').replace(/[^a-zA-Z0-9_-]+/g, '_');
+
   const preparedBy = getSavedPreparedBy();
   const authorizedBy = getSavedAuthorizedBy();
 
   const docHeading = variant === 'biodata' ? 'BIODATA REGISTER : AIRMEN' : 'NOMINAL ROLL : AIRMEN';
   const modalHeading = variant === 'biodata' ? 'OFFICIAL BIODATA REGISTER PRINT PREVIEW' : 'OFFICIAL NOMINAL ROLL PRINT PREVIEW';
-  const defaultDocName = variant === 'biodata' ? 'Biodata_Register_155_UASU_BAF' : 'Nominal_Roll_155_UASU_BAF';
+  const defaultDocName = variant === 'biodata' ? `Biodata_Register_${safeOfficeFileCode}` : `Nominal_Roll_${safeOfficeFileCode}`;
 
   const getPdfTitle = () => 
     variant === 'biodata'
@@ -154,7 +159,7 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
             <div className="text-center mb-5">
               <h1 className="text-sm sm:text-base font-black underline leading-snug tracking-wide">
                 {docHeading}<br />
-                155 UASU BAF
+                {officeIdentity.officeName}
               </h1>
             </div>
 
@@ -173,7 +178,7 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
                     <th className="p-1 sm:p-1.5 border border-black font-bold text-center whitespace-nowrap">Rank</th>
                     <th className="p-1 sm:p-1.5 border border-black font-bold text-left">Full Name</th>
                     <th className="p-1 sm:p-1.5 border border-black font-bold text-center">Trade</th>
-                    <th className="p-1 sm:p-1.5 border border-black font-bold text-center">Flight</th>
+                    {officeHasFlights && <th className="p-1 sm:p-1.5 border border-black font-bold text-center">Flight</th>}
                     {variant === 'biodata' && <th className="p-1 sm:p-1.5 border border-black font-bold text-center whitespace-nowrap">Blood Group</th>}
                     <th className="p-1 sm:p-1.5 border border-black font-bold text-left">{variant === 'biodata' ? 'Present Address' : 'Address'}</th>
                     {variant === 'biodata' && <th className="p-1 sm:p-1.5 border border-black font-bold text-left">Permanent Address</th>}
@@ -199,9 +204,11 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
                       <td className="p-1 sm:p-1.5 border border-black text-left whitespace-nowrap">
                         {airman.trade}
                       </td>
-                      <td className="p-1 sm:p-1.5 border border-black text-left whitespace-nowrap">
-                        {airman.flightName}
-                      </td>
+                      {officeHasFlights && (
+                        <td className="p-1 sm:p-1.5 border border-black text-left whitespace-nowrap">
+                          {airman.flightName}
+                        </td>
+                      )}
                       {variant === 'biodata' && (
                         <td className="p-1 sm:p-1.5 border border-black text-center whitespace-nowrap font-bold">
                           {airman.bloodGroup || '-'}
@@ -253,7 +260,7 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
                   ))}
                   {airmen.length === 0 && (
                     <tr>
-                      <td colSpan={variant === 'biodata' ? 11 : 8} className="p-4 text-center text-slate-500 font-medium">
+                      <td colSpan={variant === 'biodata' ? (officeHasFlights ? 11 : 10) : (officeHasFlights ? 8 : 7)} className="p-4 text-center text-slate-500 font-medium">
                         No airmen found.
                       </td>
                     </tr>

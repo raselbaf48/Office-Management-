@@ -205,9 +205,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <div className="font-black text-sm tracking-wide text-slate-900 dark:text-white truncate">
                   {officeIdentity.officeName}
                 </div>
-                <div className="text-[10px] font-bold text-[#059669] dark:text-amber-400 uppercase tracking-wider truncate">
-                  {officeIdentity.officeSlogan || 'Intel • Surveillance • Strike'}
-                </div>
+                {officeIdentity.officeSlogan ? (
+                  <div className="text-[10px] font-bold text-[#059669] dark:text-amber-400 uppercase tracking-wider truncate">
+                    {officeIdentity.officeSlogan}
+                  </div>
+                ) : null}
               </div>
             </div>
 

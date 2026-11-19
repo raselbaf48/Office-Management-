@@ -627,29 +627,29 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
         clearCustomOfficeConfig();
         localDb.switchActiveOfficeWorkspace(false);
       } else {
+        const rawSlogan = String(
+          office.officeSlogan ?? office.firebaseConfig?.officeSlogan ?? ''
+        ).trim();
+        const cleanSlogan =
+          rawSlogan === 'Intel • Surveillance • Strike' ? '' : rawSlogan;
         saveCustomOfficeConfig({
           officeName: office.officeName,
           officeLogo: office.officeLogo || '/155-uasu-baf-logo.png',
-          officeSlogan:
-            office.officeSlogan ||
-            office.firebaseConfig?.officeSlogan ||
-            'Intel • Surveillance • Strike',
+          officeSlogan: cleanSlogan,
           officeBase:
             office.officeBase || office.firebaseConfig?.officeBase || 'BAF BASE ZHR',
           officeCode,
           firebaseConfig: {
             ...office.firebaseConfig,
             officeCode,
+            officeSlogan: cleanSlogan,
           },
           configuredAt: office.createdAt || new Date().toISOString(),
         });
         updateActiveOfficeProfile({
           officeName: office.officeName,
           officeLogo: office.officeLogo || '/155-uasu-baf-logo.png',
-          officeSlogan:
-            office.officeSlogan ||
-            office.firebaseConfig?.officeSlogan ||
-            'Intel • Surveillance • Strike',
+          officeSlogan: cleanSlogan,
           officeBase:
             office.officeBase || office.firebaseConfig?.officeBase || 'BAF BASE ZHR',
         });
@@ -1216,10 +1216,14 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                           office.officeBase ||
                           office.firebaseConfig?.officeBase ||
                           'BAF BASE ZHR';
-                        const sloganText =
-                          office.officeSlogan ||
-                          office.firebaseConfig?.officeSlogan ||
-                          'Intel • Surveillance • Strike';
+                        const rawCardSlogan = String(
+                          office.officeSlogan ?? office.firebaseConfig?.officeSlogan ?? ''
+                        ).trim();
+                        const sloganText = isDefault155
+                          ? rawCardSlogan || 'Intel • Surveillance • Strike'
+                          : rawCardSlogan === 'Intel • Surveillance • Strike'
+                            ? ''
+                            : rawCardSlogan;
 
                         return (
                           <div
@@ -1261,8 +1265,12 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                                         <MapPin className="w-3 h-3 text-emerald-500" />
                                         {baseName}
                                       </span>
-                                      <span>•</span>
-                                      <span className="truncate">{sloganText}</span>
+                                      {sloganText ? (
+                                        <>
+                                          <span>•</span>
+                                          <span className="truncate">{sloganText}</span>
+                                        </>
+                                      ) : null}
                                     </div>
                                   </div>
                                 </div>
@@ -1469,7 +1477,10 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                                     </span>
                                   </div>
                                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                                    {req.officeBase} • {req.officeSlogan}
+                                    {req.officeBase}
+                                    {req.officeSlogan && req.officeSlogan !== 'Intel • Surveillance • Strike'
+                                      ? ` • ${req.officeSlogan}`
+                                      : ''}
                                   </p>
                                   <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
                                     Submitted: {new Date(req.createdAt).toLocaleString()}

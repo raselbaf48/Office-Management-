@@ -9,8 +9,9 @@ import { calculateBalancedAutoTargets, calculateExactDutyRatios, roundDutyByRule
 import { pushDutyListToCloud, pullDutyListFromCloud, DutySyncResult } from '../utils/dutyCloudSync';
 import { getAirmanJoinDateISO, getAirmanLeftDateISO, normalizeDateToISO, formatShortDate } from '../utils/csvExport';
 import { sortAirmenBySeniority } from '../utils/seniority';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
 import { matchAirmanId } from '../utils/airmanDisposalHelper';
+import { getAvailableTrades } from '../utils/tradeList';
 
 const STANDARD_DISPOSALS = [
   '-',
@@ -519,14 +520,31 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     return map;
   }, [airmen, targetDate, targetISO]);
 
+  const officeHasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
+
+  const activeUnitGroups = useMemo<string[]>(() => {
+    if (officeHasFlights) return ['Mechanics', 'Avionics', 'GCS', 'Admin'];
+    const distinctTrades = Array.from(
+      new Set(
+        airmen
+          .map((a) => String(a.trade || '').trim())
+          .filter((tr) => tr && tr !== '-' && tr !== 'N/A')
+      )
+    );
+    return distinctTrades.length > 0 ? distinctTrades : ['General'];
+  }, [officeHasFlights, airmen]);
+
   const filteredAirmen = useMemo(() => {
     const list = airmen.filter(a => {
       // Exclude if not present on targetDate
       if (targetISO && !isAirmanInUnitOnDate(a, targetISO)) {
         return false;
       }
-      if (nominalRollFlightFilter !== 'All' && a.flightName !== nominalRollFlightFilter) {
-        return false;
+      if (nominalRollFlightFilter !== 'All') {
+        const unitKey = officeHasFlights ? a.flightName : String(a.trade || '').trim();
+        if (unitKey !== nominalRollFlightFilter) {
+          return false;
+        }
       }
       if (nominalRollRankFilter === 'All') {
         return true;
@@ -537,7 +555,38 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
       return a.rank === nominalRollRankFilter;
     });
     return sortAirmenBySeniority(list);
-  }, [airmen, nominalRollFlightFilter, nominalRollRankFilter, targetISO]);
+  }, [airmen, nominalRollFlightFilter, nominalRollRankFilter, targetISO, officeHasFlights]);
+
+  const tradeManpowerMap = useMemo(() => {
+    const map: Record<string, { sgt: number; cpl: number }> = {};
+    activeUnitGroups.forEach((grp) => {
+      map[grp] = { sgt: 0, cpl: 0 };
+    });
+
+    airmen.forEach((a) => {
+      if (targetISO && !isAirmanInUnitOnDate(a, targetISO)) {
+        return;
+      }
+      let disp = disposals[a.id];
+      if (disp === 'Deployment' || disp === 'Deployment (Bake & Bite)' || disp === 'Deployment (Canteen)') {
+        disp = undefined;
+      }
+      if (disp === 'TDY') {
+        disp = 'TDY (Air HQ)';
+      }
+      if (disp === undefined || disp === '') {
+        disp = airmanDefaults[a.id];
+      }
+      if (!disp || disp.trim() === '' || disp.trim() === '-') {
+        const isSgt = a.rank === 'Sgt';
+        const grp = officeHasFlights ? a.flightName : (String(a.trade || '').trim() || activeUnitGroups[0] || 'General');
+        if (!map[grp]) map[grp] = { sgt: 0, cpl: 0 };
+        if (isSgt) map[grp].sgt++;
+        else map[grp].cpl++;
+      }
+    });
+    return map;
+  }, [airmen, disposals, airmanDefaults, targetISO, officeHasFlights, activeUnitGroups]);
 
   const getEffectiveManpower = () => {
     const counts = {
@@ -547,33 +596,25 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
       adminSgt: 0, adminCpl: 0,
     };
 
-    airmen.forEach(a => {
-      // Exclude if not present on targetDate
-      if (targetISO && !isAirmanInUnitOnDate(a, targetISO)) {
-        return;
-      }
-
-      let disp = disposals[a.id];
-      // For migration of existing bad data
-      if (disp === 'Deployment' || disp === 'Deployment (Bake & Bite)' || disp === 'Deployment (Canteen)') {
-         disp = undefined; // Force recalculation if it's the generic word
-      }
-      if (disp === 'TDY') {
-        disp = 'TDY (Air HQ)';
-      }
-      
-      if (disp === undefined || disp === '') {
-        disp = airmanDefaults[a.id];
-      }
-
-      if (!disp || disp.trim() === '' || disp.trim() === '-') {
-        const isSgt = a.rank === 'Sgt';
-        if (a.flightName === 'Mechanics') isSgt ? counts.mechSgt++ : counts.mechCpl++;
-        if (a.flightName === 'Avionics') isSgt ? counts.aviSgt++ : counts.aviCpl++;
-        if (a.flightName === 'GCS') isSgt ? counts.gcsSgt++ : counts.gcsCpl++;
-        if (a.flightName === 'Admin') isSgt ? counts.adminSgt++ : counts.adminCpl++;
-      }
-    });
+    if (officeHasFlights) {
+      counts.mechSgt = tradeManpowerMap['Mechanics']?.sgt || 0;
+      counts.mechCpl = tradeManpowerMap['Mechanics']?.cpl || 0;
+      counts.aviSgt = tradeManpowerMap['Avionics']?.sgt || 0;
+      counts.aviCpl = tradeManpowerMap['Avionics']?.cpl || 0;
+      counts.gcsSgt = tradeManpowerMap['GCS']?.sgt || 0;
+      counts.gcsCpl = tradeManpowerMap['GCS']?.cpl || 0;
+      counts.adminSgt = tradeManpowerMap['Admin']?.sgt || 0;
+      counts.adminCpl = tradeManpowerMap['Admin']?.cpl || 0;
+    } else {
+      activeUnitGroups.forEach((grp, idx) => {
+        const sgt = tradeManpowerMap[grp]?.sgt || 0;
+        const cpl = tradeManpowerMap[grp]?.cpl || 0;
+        if (idx === 0) { counts.mechSgt += sgt; counts.mechCpl += cpl; }
+        else if (idx === 1) { counts.aviSgt += sgt; counts.aviCpl += cpl; }
+        else if (idx === 2) { counts.gcsSgt += sgt; counts.gcsCpl += cpl; }
+        else { counts.adminSgt += sgt; counts.adminCpl += cpl; }
+      });
+    }
     return counts;
   };
 
@@ -581,8 +622,8 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
   // Override manpower with calculated effManpower so that totalSgt etc uses it!
   const currentManpower = effManpower;
   
-  const totalSgt = currentManpower.mechSgt + currentManpower.aviSgt + currentManpower.gcsSgt + currentManpower.adminSgt;
-  const totalCpl = currentManpower.mechCpl + currentManpower.aviCpl + currentManpower.gcsCpl + currentManpower.adminCpl;
+  const totalSgt = Object.values(tradeManpowerMap).reduce((sum, item) => sum + item.sgt, 0);
+  const totalCpl = Object.values(tradeManpowerMap).reduce((sum, item) => sum + item.cpl, 0);
   const totalSgtAndBelow = totalSgt + totalCpl;
 
   useEffect(() => {
@@ -624,21 +665,53 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
 
   const calculatedMatrixDistributions = useMemo(() => {
     if (!matrix) return {};
-    const exactRatios = calculateExactDutyRatios(matrix, currentManpower);
-    const result: Record<string, Record<string, { autoVal: number, exactVal: number }>> = {};
-    
-    matrix.forEach(t => {
+    if (officeHasFlights) {
+      const exactRatios = calculateExactDutyRatios(matrix, currentManpower);
+      const result: Record<string, Record<string, { autoVal: number, exactVal: number }>> = {};
+      matrix.forEach(t => {
+        result[t.id] = {};
+        const flights = ['Mechanics', 'Avionics', 'GCS', 'Admin'];
+        flights.forEach(fl => {
+          const exactVal = exactRatios[t.id]?.[fl as FlightName] ?? 0;
+          const autoVal = roundDutyByRule(exactVal);
+          result[t.id][fl] = { autoVal, exactVal };
+        });
+      });
+      return result;
+    }
+
+    const result: Record<string, Record<string, { autoVal: number; exactVal: number }>> = {};
+    matrix.forEach((t) => {
       result[t.id] = {};
-      const flights = ['Mechanics', 'Avionics', 'GCS', 'Admin'];
-      flights.forEach(fl => {
-        const exactVal = exactRatios[t.id]?.[fl as FlightName] ?? 0;
+      const isSecurity = t.id === 'security_duty';
+      const isEqual = isFixedEqualDuty(t);
+      const eligGroups = activeUnitGroups.filter(
+        (grp) => !t.eligibleFlights || t.eligibleFlights.length === 0 || t.eligibleFlights.includes(grp as any) || officeHasFlights === false
+      );
+      let poolSize = 0;
+      eligGroups.forEach((grp) => {
+        const sgt = tradeManpowerMap[grp]?.sgt || 0;
+        const cpl = tradeManpowerMap[grp]?.cpl || 0;
+        poolSize += isSecurity ? cpl : sgt + cpl;
+      });
+
+      activeUnitGroups.forEach((grp) => {
+        if (!eligGroups.includes(grp)) {
+          result[t.id][grp] = { autoVal: 0, exactVal: 0 };
+          return;
+        }
+        const sgt = tradeManpowerMap[grp]?.sgt || 0;
+        const cpl = tradeManpowerMap[grp]?.cpl || 0;
+        const grpPool = isSecurity ? cpl : sgt + cpl;
+        const exactVal = isEqual
+          ? (eligGroups.length > 0 ? (t.totalRequiredMonth || 0) / eligGroups.length : 0)
+          : (poolSize > 0 ? ((t.totalRequiredMonth || 0) * grpPool) / poolSize : 0);
         const autoVal = roundDutyByRule(exactVal);
-        result[t.id][fl] = { autoVal, exactVal };
+        result[t.id][grp] = { autoVal, exactVal };
       });
     });
-    
     return result;
-  }, [matrix, JSON.stringify(currentManpower)]);
+  }, [matrix, JSON.stringify(currentManpower), officeHasFlights, activeUnitGroups, tradeManpowerMap]);
 
   return (
     <div className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 p-4 md:p-8 min-h-max overflow-auto text-sm font-sans relative" style={{ fontFamily: 'Arial, sans-serif' }}>
@@ -1116,18 +1189,16 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                 <table className="w-full border-collapse border border-slate-400 dark:border-slate-700 text-center bg-white dark:bg-slate-900 text-sm">
                   <thead className="bg-slate-100 dark:bg-slate-800">
                     <tr>
-                      <th className="border border-slate-400 dark:border-slate-700 px-3 py-2 font-bold">Flight</th>
+                      <th className="border border-slate-400 dark:border-slate-700 px-3 py-2 font-bold">{officeHasFlights ? 'Flight' : 'Trade'}</th>
                       <th className="border border-slate-400 dark:border-slate-700 px-3 py-2 font-bold">Sgt</th>
                       <th className="border border-slate-400 dark:border-slate-700 px-3 py-2 font-bold">Cpl & Below</th>
                       <th className="border border-slate-400 dark:border-slate-700 px-3 py-2 font-bold text-indigo-700 dark:text-indigo-400">Total</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {['Mechanics', 'Avionics', 'GCS', 'Admin'].map(fl => {
-                       const sgtKey = fl === 'Mechanics' ? 'mechSgt' : fl === 'Avionics' ? 'aviSgt' : fl === 'GCS' ? 'gcsSgt' : 'adminSgt';
-                       const cplKey = fl === 'Mechanics' ? 'mechCpl' : fl === 'Avionics' ? 'aviCpl' : fl === 'GCS' ? 'gcsCpl' : 'adminCpl';
-                       const sgtCount = currentManpower[sgtKey as keyof typeof currentManpower];
-                       const cplCount = currentManpower[cplKey as keyof typeof currentManpower];
+                    {activeUnitGroups.map(fl => {
+                       const sgtCount = tradeManpowerMap[fl]?.sgt || 0;
+                       const cplCount = tradeManpowerMap[fl]?.cpl || 0;
                        return (
                         <tr key={fl}>
                           <td className="border border-slate-400 dark:border-slate-700 px-3 py-2 font-semibold text-slate-700 dark:text-slate-300">{fl}</td>
@@ -1161,21 +1232,21 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                 
                 {showNominalRoll && (
                   <div className="p-0 overflow-x-auto">
-                    {/* Flight & Rank Filter Bar */}
+                    {/* Flight / Trade & Rank Filter Bar */}
                     <div className="flex flex-col gap-2.5 px-4 py-2.5 bg-slate-100 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-700">
-                      {/* Row 1: Flight Filter & Total Counter */}
+                      {/* Row 1: Flight / Trade Filter & Total Counter */}
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="flex items-center space-x-2 text-xs">
                           <span className="font-bold text-slate-600 dark:text-slate-300 flex items-center gap-1 min-w-[50px]">
                             <Filter className="w-3.5 h-3.5 text-indigo-500" />
-                            Flight:
+                            {officeHasFlights ? 'Flight:' : 'Trade:'}
                           </span>
                           <div className="flex flex-wrap items-center gap-1.5">
-                            {(['All', 'Mechanics', 'Avionics', 'GCS', 'Admin'] as const).map(flt => (
+                            {(['All', ...activeUnitGroups]).map(flt => (
                               <button
                                 key={flt}
                                 type="button"
-                                onClick={() => setNominalRollFlightFilter(flt)}
+                                onClick={() => setNominalRollFlightFilter(flt as any)}
                                 className={`px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer ${
                                   nominalRollFlightFilter === flt
                                     ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-500'
@@ -1235,7 +1306,9 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                           <th className="px-3 py-2 text-center border-b border-slate-300 dark:border-slate-600 whitespace-nowrap">Rank</th>
                           <th className="px-3 py-2 text-center border-b border-slate-300 dark:border-slate-600 whitespace-nowrap">Name</th>
                           <th className="px-3 py-2 text-center border-b border-slate-300 dark:border-slate-600 whitespace-nowrap">Trade</th>
-                          <th className="px-3 py-2 text-center border-b border-slate-300 dark:border-slate-600 whitespace-nowrap">Flight</th>
+                          {officeHasFlights && (
+                            <th className="px-3 py-2 text-center border-b border-slate-300 dark:border-slate-600 whitespace-nowrap">Flight</th>
+                          )}
                           <th className="px-3 py-2 text-center border-b border-slate-300 dark:border-slate-600 whitespace-nowrap">Posting Dt</th>
                           <th className="px-3 py-2 text-center border-b border-slate-300 dark:border-slate-600 whitespace-nowrap">Disposal</th>
                         </tr>
@@ -1272,7 +1345,9 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                               <td className="px-3 py-2 text-center font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">{formatAirmanName(a.rank)}</td>
                               <td className="px-3 py-2 text-left font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap">{a.name}</td>
                               <td className="px-3 py-2 text-left text-slate-600 dark:text-slate-400 whitespace-nowrap">{a.trade}</td>
-                              <td className="px-3 py-2 text-left text-slate-600 dark:text-slate-400 whitespace-nowrap">{a.flightName}</td>
+                              {officeHasFlights && (
+                                <td className="px-3 py-2 text-left text-slate-600 dark:text-slate-400 whitespace-nowrap">{a.flightName}</td>
+                              )}
                               <td className="px-3 py-2 text-center text-slate-600 dark:text-slate-400 whitespace-nowrap">
                                 {joinDtISO ? (
                                   <span className="px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 font-mono text-[11px] font-semibold">
@@ -1343,7 +1418,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                          {isEqual ? (
                            <>
                              Total {t.title} ÷ Total<br/>
-                             Eligible Flights
+                             {officeHasFlights ? 'Eligible Flights' : 'Eligible Trades'}
                            </>
                          ) : (
                            <>
@@ -1367,17 +1442,12 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                   {matrix && matrix.filter(t => !t.isDisabled).map(t => {
                      const isSecurity = t.id === 'security_duty';
                      const isEqual = isFixedEqualDuty(t);
-                     const elig = t.eligibleFlights && t.eligibleFlights.length > 0 ? t.eligibleFlights : ['Mechanics', 'Avionics', 'GCS', 'Admin'];
+                     const elig = (officeHasFlights && t.eligibleFlights && t.eligibleFlights.length > 0) ? t.eligibleFlights : activeUnitGroups;
                      let poolSize = 0;
-                     ['Mechanics', 'Avionics', 'GCS', 'Admin'].forEach(fl => {
-                       if (t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
-                       
-                       let fltCpl = 0, fltSgt = 0;
-                       if (fl === 'Mechanics') { fltCpl = currentManpower.mechCpl; fltSgt = currentManpower.mechSgt; }
-                       if (fl === 'Avionics') { fltCpl = currentManpower.aviCpl; fltSgt = currentManpower.aviSgt; }
-                       if (fl === 'GCS') { fltCpl = currentManpower.gcsCpl; fltSgt = currentManpower.gcsSgt; }
-                       if (fl === 'Admin') { fltCpl = currentManpower.adminCpl; fltSgt = currentManpower.adminSgt; }
-                       
+                     activeUnitGroups.forEach(fl => {
+                       if (officeHasFlights && t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
+                       const fltSgt = tradeManpowerMap[fl]?.sgt || 0;
+                       const fltCpl = tradeManpowerMap[fl]?.cpl || 0;
                        poolSize += isSecurity ? fltCpl : (fltCpl + fltSgt);
                      });
                      
@@ -1395,10 +1465,12 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
             </table>
           </div>
 
-          {/* DISTRIBUTION AS PER FLIGHT */}
+          {/* DISTRIBUTION AS PER FLIGHT / TRADE */}
           <div className="overflow-x-auto pb-4">
             <div className="flex flex-col items-center justify-center mb-4 w-full gap-2">
-              <div className="font-bold underline text-sm text-center">DISTRIBUTION AS PER FLIGHT</div>
+              <div className="font-bold underline text-sm text-center">
+                {officeHasFlights ? 'DISTRIBUTION AS PER FLIGHT' : 'DISTRIBUTION AS PER TRADE'}
+              </div>
               <div className="flex justify-center items-center gap-2">
                 <button 
                   onClick={() => setShowExactRatio(!showExactRatio)}
@@ -1417,7 +1489,9 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
             <table className="border-collapse border border-slate-400 dark:border-slate-700 text-center w-full min-w-[900px] bg-white dark:bg-slate-900 text-sm">
               <thead>
                 <tr>
-                  <th className="border border-slate-400 dark:border-slate-700 px-2 py-2 font-bold bg-slate-100 dark:bg-slate-800 text-center w-32">DUTY PER FLIGHT</th>
+                  <th className="border border-slate-400 dark:border-slate-700 px-2 py-2 font-bold bg-slate-100 dark:bg-slate-800 text-center w-32">
+                    {officeHasFlights ? 'DUTY PER FLIGHT' : 'DUTY PER TRADE'}
+                  </th>
                   {matrix && matrix.filter(t => !t.isDisabled).map(t => (
                     <th key={t.id} className="border border-slate-400 dark:border-slate-700 px-2 py-2 font-bold bg-slate-100 dark:bg-slate-800">{t.title}</th>
                   ))}
@@ -1425,10 +1499,10 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                 </tr>
               </thead>
               <tbody>
-                {['Mechanics', 'Avionics', 'GCS', 'Admin'].map(fl => {
+                {activeUnitGroups.map(fl => {
                   let flightTotalDuties = 0;
                   matrix && matrix.filter(t => !t.isDisabled).forEach(t => {
-                    if (t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
+                    if (officeHasFlights && t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
                     const manualVal = t.flightTargets?.[fl as keyof typeof t.flightTargets];
                     const autoVal = calculatedMatrixDistributions[t.id]?.[fl]?.autoVal || 0;
                     flightTotalDuties += (manualVal !== undefined ? manualVal : autoVal);
@@ -1437,20 +1511,10 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                   return (
                     <tr key={fl}>
                       <td className="border border-slate-400 dark:border-slate-700 px-2 py-1 font-bold text-center bg-slate-50 dark:bg-slate-800">
-                        {fl} FLT
+                        {officeHasFlights ? `${fl} FLT` : fl}
                       </td>
                       {matrix && matrix.filter(t => !t.isDisabled).map(t => {
-                        const isSecurity = t.id === 'security_duty';
-                        const poolSize = isSecurity ? totalCpl : totalSgtAndBelow;
-                        const dutyTotal = t.totalRequiredMonth || 0;
-                        const dppVal = poolSize > 0 ? (dutyTotal / poolSize) : 0;
-                        
-                        let fltCpl = 0, fltSgt = 0;
-                        if (fl === 'Mechanics') { fltCpl = currentManpower.mechCpl; fltSgt = currentManpower.mechSgt; }
-                        if (fl === 'Avionics') { fltCpl = currentManpower.aviCpl; fltSgt = currentManpower.aviSgt; }
-                        if (fl === 'GCS') { fltCpl = currentManpower.gcsCpl; fltSgt = currentManpower.gcsSgt; }
-                        if (fl === 'Admin') { fltCpl = currentManpower.adminCpl; fltSgt = currentManpower.adminSgt; }
-                        
+                        const isIneligible = officeHasFlights && t.eligibleFlights && !t.eligibleFlights.includes(fl as any);
                         // Retrieve pre-calculated rule-based values
                         const distribution = calculatedMatrixDistributions[t.id]?.[fl];
                         const exactVal = distribution?.exactVal || 0;
@@ -1466,18 +1530,18 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                             key={t.id} 
                             ref={isActive ? activeCellRef : undefined}
                             onClick={() => {
-                              if (t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
+                              if (isIneligible) return;
                               setActiveDistributionCell({ tableId: t.id, flight: fl });
                             }}
                             className={`border border-slate-400 dark:border-slate-700 px-0 py-0 relative transition-colors ${
-                              t.eligibleFlights && !t.eligibleFlights.includes(fl as any)
+                              isIneligible
                                 ? ''
                                 : isActive
                                 ? 'bg-indigo-50 dark:bg-indigo-950/70 ring-2 ring-indigo-500 z-10'
                                 : 'hover:bg-slate-100 dark:hover:bg-slate-800/60 cursor-pointer'
                             }`}
                           >
-                            {t.eligibleFlights && !t.eligibleFlights.includes(fl as any) ? (
+                            {isIneligible ? (
                               <div className="w-full text-center text-slate-400 bg-slate-100 dark:bg-slate-800/50 py-1">N/A</div>
                             ) : isActive ? (
                               <div className="w-full h-full min-h-[30px] flex items-center justify-center px-1 py-0.5 gap-1 select-none" onClick={(e) => e.stopPropagation()}>
@@ -1540,7 +1604,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                   <td className="border border-slate-400 dark:border-slate-700 px-2 py-1 text-center">TOTAL</td>
                   {matrix && matrix.filter(t => !t.isDisabled).map(t => {
                     let totalVal = 0;
-                    ['Mechanics', 'Avionics', 'GCS', 'Admin'].forEach(fl => {
+                    activeUnitGroups.forEach(fl => {
                        const manual = t.flightTargets?.[fl as keyof typeof t.flightTargets];
                        if (manual !== undefined) {
                          totalVal += manual;
@@ -1568,9 +1632,9 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                     (() => {
                       let grandTotal = 0;
                       let grandRequired = 0;
-                      ['Mechanics', 'Avionics', 'GCS', 'Admin'].forEach(fl => {
+                      activeUnitGroups.forEach(fl => {
                         matrix && matrix.filter(t => !t.isDisabled).forEach(t => {
-                          if (t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
+                          if (officeHasFlights && t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
                           const manual = t.flightTargets?.[fl as keyof typeof t.flightTargets];
                           grandTotal += (manual !== undefined ? manual : (calculatedMatrixDistributions[t.id]?.[fl]?.autoVal || 0));
                         });
@@ -1586,9 +1650,9 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                     {(() => {
                       let grandTotal = 0;
                       let grandRequired = 0;
-                      ['Mechanics', 'Avionics', 'GCS', 'Admin'].forEach(fl => {
+                      activeUnitGroups.forEach(fl => {
                         matrix && matrix.filter(t => !t.isDisabled).forEach(t => {
-                          if (t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
+                          if (officeHasFlights && t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
                           const manual = t.flightTargets?.[fl as keyof typeof t.flightTargets];
                           grandTotal += (manual !== undefined ? manual : (calculatedMatrixDistributions[t.id]?.[fl]?.autoVal || 0));
                         });

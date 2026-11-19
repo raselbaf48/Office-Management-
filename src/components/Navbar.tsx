@@ -63,9 +63,11 @@ export const Navbar: React.FC<NavbarProps> = ({
                   {officeIdentity.officeBase || 'BAF BASE ZHR'}
                 </span>
               </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400 hidden sm:block">
-                {officeIdentity.officeSlogan || 'Intel • Surveillance • Strike'}
-              </p>
+              {officeIdentity.officeSlogan ? (
+                <p className="text-xs text-slate-500 dark:text-slate-400 hidden sm:block">
+                  {officeIdentity.officeSlogan}
+                </p>
+              ) : null}
             </div>
           </div>
 

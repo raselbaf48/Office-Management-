@@ -80,7 +80,9 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
     existingConfig?.officeLogo || '/155-uasu-baf-logo.png'
   );
   const [officeSlogan, setOfficeSlogan] = useState<string>(
-    existingConfig?.officeSlogan || 'Intel • Surveillance • Strike'
+    existingConfig?.officeSlogan && existingConfig.officeSlogan !== 'Intel • Surveillance • Strike'
+      ? existingConfig.officeSlogan
+      : ''
   );
   const [officeBase, setOfficeBase] = useState<string>(
     existingConfig?.officeBase || 'BAF BASE ZHR'
@@ -278,7 +280,7 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
         cleanJoinPin || undefined
       );
 
-      const resolvedSlogan = officeSlogan.trim() || 'Intel • Surveillance • Strike';
+      const resolvedSlogan = officeSlogan.trim();
       const resolvedBase = officeBase.trim() || 'BAF BASE ZHR';
       const resolvedLogo = officeLogo.trim() || '/155-uasu-baf-logo.png';
 
@@ -422,10 +424,14 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
         return;
       }
 
+      const rawMatchedSlogan = String(
+        matched.officeSlogan ?? matched.firebaseConfig?.officeSlogan ?? ''
+      ).trim();
       const connectedConfig: CustomOfficeConfig = {
         officeName: matched.officeName,
         officeLogo: matched.officeLogo || '/155-uasu-baf-logo.png',
-        officeSlogan: matched.officeSlogan || matched.firebaseConfig?.officeSlogan || 'Intel • Surveillance • Strike',
+        officeSlogan:
+          rawMatchedSlogan === 'Intel • Surveillance • Strike' ? '' : rawMatchedSlogan,
         officeBase: matched.officeBase || matched.firebaseConfig?.officeBase || 'BAF BASE ZHR',
         officeCode:
           matched.officeCode ||

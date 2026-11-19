@@ -21,6 +21,7 @@ import Papa from 'papaparse';
 import { localDb } from '../services/localDatabase';
 import { exportAirmenTemplateExcel, normalizeDateToISO, formatShortDate } from '../utils/csvExport';
 import { isJcoRank } from '../utils/seniority';
+import { doesOfficeHaveFlights } from '../firebase';
 
 interface BulkImportAirmenModalProps {
   isOpen: boolean;
@@ -91,6 +92,8 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
     return { flight: 'Admin', valid: false };
   };
 
+  const officeHasFlights = doesOfficeHaveFlights(existingAirmen);
+
   const validateRows = (rawRows: ParsedAirmanRow[], existing: Airman[]): ParsedAirmanRow[] => {
     const existingBdSet = new Set(existing.map((a) => normalizeBd(a.bdNo)));
     const fileBdCount: Record<string, number> = {};
@@ -133,10 +136,12 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
         errors.push(`Invalid rank "${row.rank}". Allowed: MWO, SWO, WO, Sgt, Cpl, LAC, AC-1, AC-2`);
       }
 
-      // Flight validation
-      const flightCheck = normalizeFlight(row.flightName);
-      if (!flightCheck.valid) {
-        errors.push(`Invalid flight "${row.flightName}". Allowed: Avionics, Mechanics, GCS, Admin`);
+      // Flight validation (only for offices with flights)
+      if (officeHasFlights) {
+        const flightCheck = normalizeFlight(row.flightName);
+        if (!flightCheck.valid) {
+          errors.push(`Invalid flight "${row.flightName}". Allowed: Avionics, Mechanics, GCS, Admin`);
+        }
       }
 
       return {
@@ -164,7 +169,7 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
     };
 
     // Columns matching exact Export CSV sequence:
-    // Ser, BD No, Rank, Full Name, Surname, Trade, Flight, Blood Group, Present Address, Permanent Address, Mobile No, Dt of Posting
+    // Ser, BD No, Rank, Full Name, Surname, Trade, [Flight], Blood Group, Present Address, Permanent Address, Mobile No, Dt of Posting
     const seniorityIdx = findCol(['seniority', 'senior', 'জ্যেষ্ঠতা']);
     const bdIdx = findCol(['bd no', 'bdno', 'service no', 'svc no', 'bd']);
     const rankIdx = findCol(['rank', 'পদবি']);
@@ -213,7 +218,7 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
 
       let rawBd = getVal(bdIdx, '').replace(/^BD\/?/i, '').trim();
       const rawTrade = getVal(tradeIdx, 'Afr Fitt');
-      const rawFlight = getVal(flightIdx, 'Admin');
+      const rawFlight = officeHasFlights ? getVal(flightIdx, 'Admin') : '';
       const rawBloodGroup = getVal(bloodGroupIdx, '');
       const rawPresentAddress = getVal(presentAddressIdx, '');
       const rawPermanentAddress = getVal(permanentAddressIdx, '');
@@ -339,7 +344,7 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
   };
 
   const handleDownloadExcelSample = () => {
-    exportAirmenTemplateExcel('BAF_155_UASU_Airmen_Biodata_Template.xlsx');
+    exportAirmenTemplateExcel();
   };
 
   const handleParsePaste = () => {
@@ -370,7 +375,11 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
 
     if (!hasHeader) {
       // Prepend standard header matching standard column order:
-      rawRows.unshift(['BD No', 'Rank', 'Full Name', 'Trade', 'Flight', 'Mobile No', 'Present Address']);
+      rawRows.unshift(
+        officeHasFlights
+          ? ['BD No', 'Rank', 'Full Name', 'Trade', 'Flight', 'Mobile No', 'Present Address']
+          : ['BD No', 'Rank', 'Full Name', 'Trade', 'Mobile No', 'Present Address']
+      );
     }
 
     setFileName('Direct Paste / Typed');
@@ -401,7 +410,7 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
           bloodGroup: r.bloodGroup?.trim() || '',
           dateJoined: r.dateJoined?.trim() || '',
           mobileNo: r.mobileNo.trim() || '01700000000',
-          flightName: flightObj.flight,
+          flightName: officeHasFlights ? flightObj.flight : ('' as any),
           remarks: r.remarks.trim() || 'Bulk Imported',
           code: `${rankObj.rank}-${r.name.trim().slice(0, 3).toUpperCase()}`,
         };

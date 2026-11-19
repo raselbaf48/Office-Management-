@@ -211,7 +211,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const saved = updateActiveOfficeProfile({
       officeName: profileUnitName.trim() || '155 UASU BAF',
       officeLogo: profileLogo.trim() || '/155-uasu-baf-logo.png',
-      officeSlogan: profileSlogan.trim() || 'Intel • Surveillance • Strike',
+      officeSlogan: profileSlogan.trim(),
       officeBase: profileBase.trim() || 'BAF BASE ZHR',
     });
     setProfileUnitName(saved.officeName);
@@ -1108,9 +1108,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             <h4 className="text-xl sm:text-2xl font-black tracking-tight text-white truncate">
                               {profileUnitName || '155 UASU BAF'}
                             </h4>
-                            <p className="text-xs font-semibold text-emerald-400 tracking-wider uppercase mt-0.5">
-                              {profileSlogan || 'Intel • Surveillance • Strike'}
-                            </p>
+                            {profileSlogan.trim() ? (
+                              <p className="text-xs font-semibold text-emerald-400 tracking-wider uppercase mt-0.5">
+                                {profileSlogan}
+                              </p>
+                            ) : null}
                           </div>
                         </div>
                       </div>
