@@ -23,6 +23,7 @@ import {
   getOfficeScopedStorageKey,
   getOfficeFirestoreDocPrefix,
   isDefault155UasuOffice,
+  IS_AI_STUDIO_PRACTICE_MODE,
 } from '../firebase';
 
 export interface FirebaseMigrationResult {
@@ -352,8 +353,8 @@ export async function probeFirebaseConnectionAndQuota(forceServerCheck = false):
   quotaExceeded: boolean;
   errorMsg?: string;
 }> {
-  if (!isFirebaseConfigured || !dbLite) {
-    return { ok: false, quotaExceeded: false, errorMsg: 'Firebase not configured' };
+  if (IS_AI_STUDIO_PRACTICE_MODE || !isFirebaseConfigured || !dbLite) {
+    return { ok: false, quotaExceeded: false, errorMsg: 'AI Studio Practice Mode (Cloud sync disabled)' };
   }
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return { ok: false, quotaExceeded: false, errorMsg: 'Device is offline' };
@@ -474,7 +475,7 @@ async function probeFirestoreRestHealth(timeoutMs = 5000): Promise<{
   quotaExceeded: boolean;
   errorMsg?: string;
 }> {
-  if (!isFirebaseConfigured || typeof fetch !== 'function') {
+  if (IS_AI_STUDIO_PRACTICE_MODE || !isFirebaseConfigured || typeof fetch !== 'function') {
     return { ok: false, quotaExceeded: false };
   }
   const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
@@ -505,8 +506,8 @@ async function runQueryRestFallback(
   sinceIso?: string,
   timeoutMs = 15000
 ): Promise<any[]> {
-  if (!isFirebaseConfigured || typeof fetch !== 'function') {
-    throw new Error(`Firestore REST fallback unavailable for ${collectionId}`);
+  if (IS_AI_STUDIO_PRACTICE_MODE || !isFirebaseConfigured || typeof fetch !== 'function') {
+    return [];
   }
   const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
     firebaseConfig.projectId

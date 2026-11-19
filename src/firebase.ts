@@ -546,6 +546,37 @@ export function hasCustomOfficeConfig(): boolean {
 const urlSetupConfig = checkAndApplyUrlSetupParam();
 
 // ============================================================================
+// AI STUDIO PRACTICE MODE DETECTION
+// When running inside AI Studio preview/dev (or localhost), all data changes stay
+// 100% local for practice — never push to or pull from Firebase Cloud.
+// Only the Live deployed app pushes and pulls data with Firebase Cloud.
+// ============================================================================
+export function isAiStudioPracticeEnvironment(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const host = String(window.location.hostname || '').toLowerCase().trim();
+    const isAiStudioHost =
+      host.startsWith('ais-dev-') ||
+      host.startsWith('ais-pre-') ||
+      host.includes('.scf.usercontent.goog') ||
+      host.includes('aistudio.google.com') ||
+      host === 'localhost' ||
+      host === '127.0.0.1';
+    if (isAiStudioHost) return true;
+    // Also detect if embedded inside the AI Studio preview iframe
+    if (window.self !== window.top) {
+      const ref = String(document.referrer || '').toLowerCase();
+      if (ref.includes('aistudio.google.com') || ref.includes('ais-dev-') || ref.includes('ais-pre-')) {
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
+export const IS_AI_STUDIO_PRACTICE_MODE: boolean = isAiStudioPracticeEnvironment();
+
+// ============================================================================
 // 1A. INITIALIZE MASTER OWNER FIREBASE INSTANCE (masterApp / masterDb / masterAuth)
 // ============================================================================
 const isMasterPlaceholder =
@@ -561,7 +592,13 @@ let masterAppInstance: FirebaseApp | null = null;
 let masterDbInstance: FirestoreLite | null = null;
 let masterAuthInstance: Auth | null = null;
 
-if (effectiveMasterConfig && effectiveMasterConfig.apiKey && effectiveMasterConfig.projectId && effectiveMasterConfig.projectId !== 'remixed-project-id') {
+if (
+  !IS_AI_STUDIO_PRACTICE_MODE &&
+  effectiveMasterConfig &&
+  effectiveMasterConfig.apiKey &&
+  effectiveMasterConfig.projectId &&
+  effectiveMasterConfig.projectId !== 'remixed-project-id'
+) {
   try {
     const existingMaster = getApps().find((a) => a.name === 'master_owner_app');
     masterAppInstance = existingMaster || initializeApp(effectiveMasterConfig, 'master_owner_app');
@@ -604,6 +641,7 @@ function resolveActiveOfficeFirebaseConfig(): OfficeFirebaseConfig {
 export let firebaseConfig: OfficeFirebaseConfig = resolveActiveOfficeFirebaseConfig();
 
 export let isFirebaseConfigured: boolean = Boolean(
+  !IS_AI_STUDIO_PRACTICE_MODE &&
   firebaseConfig &&
   firebaseConfig.projectId &&
   firebaseConfig.projectId !== 'remixed-project-id' &&
@@ -629,13 +667,14 @@ function initDynamicOfficeFirebase(customCfg?: CustomOfficeConfig | null): void 
   const targetFbConfig = activeCustomOffice?.firebaseConfig || (firebaseConfigData as OfficeFirebaseConfig);
   firebaseConfig = targetFbConfig;
   isFirebaseConfigured = Boolean(
+    !IS_AI_STUDIO_PRACTICE_MODE &&
     targetFbConfig &&
     targetFbConfig.projectId &&
     targetFbConfig.projectId !== 'remixed-project-id' &&
     targetFbConfig.apiKey
   );
 
-  if (!isFirebaseConfigured) return;
+  if (!isFirebaseConfigured || IS_AI_STUDIO_PRACTICE_MODE) return;
 
   try {
     const appName = activeCustomOffice
