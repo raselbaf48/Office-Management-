@@ -187,7 +187,7 @@ export interface RegisteredOfficeRecord {
 export type CustomFirebaseConfig = OfficeFirebaseConfig;
 export type RegisteredOfficeTelemetry = RegisteredOfficeRecord;
 
-export const DEFAULT_APP_LOGO = '/office-management-logo.jpg';
+export const DEFAULT_APP_LOGO = '/office-management-logo.png?v=15';
 export const DEFAULT_APP_TITLE = 'Office Management Application';
 
 export function syncBrowserTabIdentity(
@@ -1169,19 +1169,45 @@ export async function saveMasterCredentials(
 
 let lastMasterCredsSyncAt = 0;
 let inFlightMasterCredsPromise: Promise<MasterCredentials> | null = null;
-const MASTER_READ_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown
+const MASTER_READ_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes cooldown to preserve Firestore read quota
+
+function isMasterCooldownActive(cooldownKey: string, memoryTimestamp: number): boolean {
+  const now = Date.now();
+  if (memoryTimestamp > 0 && now - memoryTimestamp < MASTER_READ_COOLDOWN_MS) {
+    return true;
+  }
+  if (typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      const saved = Number(window.sessionStorage.getItem(cooldownKey) || 0);
+      if (saved > 0 && now - saved < MASTER_READ_COOLDOWN_MS) {
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+function markMasterCooldownTimestamp(cooldownKey: string): number {
+  const now = Date.now();
+  if (typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      window.sessionStorage.setItem(cooldownKey, String(now));
+    } catch {}
+  }
+  return now;
+}
 
 export async function syncMasterCredentialsFromCloud(force = false): Promise<MasterCredentials> {
   const local = getMasterCredentials();
   if (!masterDbInstance || isFirestoreQuotaExceeded()) return local;
-  if (!force && Date.now() - lastMasterCredsSyncAt < MASTER_READ_COOLDOWN_MS) {
+  if (!force && isMasterCooldownActive('baf_cd_master_creds', lastMasterCredsSyncAt)) {
     return local;
   }
   if (inFlightMasterCredsPromise) return inFlightMasterCredsPromise;
 
   inFlightMasterCredsPromise = (async () => {
     try {
-      lastMasterCredsSyncAt = Date.now();
+      lastMasterCredsSyncAt = markMasterCooldownTimestamp('baf_cd_master_creds');
       const snap = await getDoc(doc(masterDbInstance!, 'app_settings', MASTER_CREDENTIALS_STORAGE_KEY));
       if (snap.exists()) {
         const data = snap.data();
@@ -1751,7 +1777,7 @@ export async function fetchRegisteredOfficesFromMaster(force = false): Promise<R
   if (!masterDbInstance || isFirestoreQuotaExceeded()) {
     return getRegisteredOfficesLocal();
   }
-  if (!force && Date.now() - lastRegisteredOfficesFetchAt < MASTER_READ_COOLDOWN_MS) {
+  if (!force && isMasterCooldownActive('baf_cd_reg_offices', lastRegisteredOfficesFetchAt)) {
     return getRegisteredOfficesLocal();
   }
   if (inFlightRegisteredOfficesPromise) {
@@ -1760,7 +1786,7 @@ export async function fetchRegisteredOfficesFromMaster(force = false): Promise<R
 
   inFlightRegisteredOfficesPromise = (async () => {
     try {
-      lastRegisteredOfficesFetchAt = Date.now();
+      lastRegisteredOfficesFetchAt = markMasterCooldownTimestamp('baf_cd_reg_offices');
       const cache = getLocalMasterOfficesCache();
       let removedCodes = getRemovedOfficeCodes();
       const mergedMap = new Map<string, RegisteredOfficeRecord>();
@@ -1933,7 +1959,8 @@ export function registerUsersInGlobalOfficeDirectory(
     officeBase: string;
     isDefault155: boolean;
     officeConfig?: CustomOfficeConfig;
-  }
+  },
+  syncToCloud: boolean = true
 ): void {
   if (!Array.isArray(users) || users.length === 0) return;
 
@@ -2033,7 +2060,7 @@ export function registerUsersInGlobalOfficeDirectory(
   });
 
   if (changed) {
-    saveGlobalUserOfficeMap(map, true);
+    saveGlobalUserOfficeMap(map, syncToCloud);
   }
 }
 
@@ -2574,16 +2601,15 @@ export async function syncGlobalUserOfficeMapFromCloud(force: boolean = false): 
   const localMap = getGlobalUserOfficeMap();
   if (!masterDbInstance || isFirestoreQuotaExceeded()) return localMap;
 
-  const now = Date.now();
-  if (!force && now - lastGlobalUserMapSyncAt < MASTER_READ_COOLDOWN_MS && Object.keys(localMap).length > 0) {
+  if (!force && isMasterCooldownActive('baf_cd_global_user_map', lastGlobalUserMapSyncAt) && Object.keys(localMap).length > 0) {
     return localMap;
   }
   if (inFlightGlobalUserMapPromise) return inFlightGlobalUserMapPromise;
 
   inFlightGlobalUserMapPromise = (async () => {
     try {
-      lastGlobalUserMapSyncAt = Date.now();
-      // 1. Fetch registered_offices (uses 5-min cooldown internally)
+      lastGlobalUserMapSyncAt = markMasterCooldownTimestamp('baf_cd_global_user_map');
+      // 1. Fetch registered_offices (uses 30-min cooldown internally)
       const registeredOffices = await fetchRegisteredOfficesFromMaster(force).catch(() => []);
       const officeByCode = new Map<string, RegisteredOfficeRecord>();
       registeredOffices.forEach((o) => {
@@ -2594,14 +2620,12 @@ export async function syncGlobalUserOfficeMapFromCloud(force: boolean = false): 
       });
 
       // 2. Fetch single document app_settings/baf_global_user_office_map_v1 (1 read instead of N user_profiles reads)
-      let hasCloudGlobalMap = false;
       const snap = await getDoc(doc(masterDbInstance!, 'app_settings', GLOBAL_USER_OFFICE_MAP_KEY));
       if (snap.exists()) {
         const data = snap.data();
         if (data?.value) {
           const cloudMap = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
           if (cloudMap && typeof cloudMap === 'object' && Object.keys(cloudMap).length > 0) {
-            hasCloudGlobalMap = true;
             Object.entries(cloudMap).forEach(([bdKey, entry]: [string, any]) => {
               if (entry && entry.bdNo) {
                 localMap[bdKey] = {
@@ -2618,8 +2642,8 @@ export async function syncGlobalUserOfficeMapFromCloud(force: boolean = false): 
         }
       }
 
-      // 3. Only scan user_profiles collection if forced OR if global map doc was empty/missing
-      if (force || !hasCloudGlobalMap) {
+      // 3. Only scan user_profiles collection when explicitly forced (prevents full-collection scan on boot/login)
+      if (force) {
         const usersSnap = await getDocs(collection(masterDbInstance!, 'user_profiles')).catch(() => null);
         if (usersSnap) {
           usersSnap.forEach((docSnap) => {
@@ -2799,8 +2823,7 @@ export async function fetchPendingOfficeRequestsFromMaster(force: boolean = fals
   const localList = getPendingOfficeRequestsLocal();
   if (!masterDbInstance || isFirestoreQuotaExceeded()) return localList;
 
-  const now = Date.now();
-  if (!force && now - lastPendingRequestsFetchAt < MASTER_READ_COOLDOWN_MS) {
+  if (!force && isMasterCooldownActive('baf_cd_pending_reqs', lastPendingRequestsFetchAt)) {
     return localList;
   }
   if (inFlightPendingRequestsPromise) return inFlightPendingRequestsPromise;
@@ -2814,7 +2837,7 @@ export async function fetchPendingOfficeRequestsFromMaster(force: boolean = fals
     });
 
     try {
-      lastPendingRequestsFetchAt = Date.now();
+      lastPendingRequestsFetchAt = markMasterCooldownTimestamp('baf_cd_pending_reqs');
       const snap = await getDoc(doc(masterDbInstance!, 'app_settings', PENDING_OFFICE_REQUESTS_KEY));
       if (snap.exists()) {
         const data = snap.data();

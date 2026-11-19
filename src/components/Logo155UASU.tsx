@@ -37,6 +37,10 @@ export const Logo155UASU: React.FC<LogoProps> = ({
     };
   }, []);
 
+  useEffect(() => {
+    setImgError(false);
+  }, [logoOverride, identity.officeLogo]);
+
   let sizeStyle: React.CSSProperties = {};
   if (typeof size === 'number') {
     sizeStyle = { width: size, height: size };
@@ -52,9 +56,14 @@ export const Logo155UASU: React.FC<LogoProps> = ({
     return className;
   };
 
+  const rawLogoSrc = logoOverride || identity.officeLogo || '/155-uasu-baf-logo.png';
+  const normalizedLogoSrc = rawLogoSrc.includes('office-management-logo')
+    ? '/office-management-logo.png?v=15'
+    : rawLogoSrc;
+
   const activeLogoSrc = imgError
-    ? '/155-uasu-baf-logo.png'
-    : logoOverride || identity.officeLogo || '/155-uasu-baf-logo.png';
+    ? '/office-management-logo.png?v=15'
+    : normalizedLogoSrc;
 
   return (
     <div

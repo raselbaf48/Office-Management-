@@ -175,18 +175,22 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     };
   }, []);
 
-  // Ensure current office users and cloud user-office directory are indexed for instant BD No -> Office matching
+  // Ensure current office users are indexed locally (without spamming cloud writes on every render)
+  const hasSyncedCloudMapRef = useRef(false);
   useEffect(() => {
     try {
       const currentUsers = getDetailedUsers(airmen);
-      registerUsersInGlobalOfficeDirectory(currentUsers);
+      registerUsersInGlobalOfficeDirectory(currentUsers, undefined, false);
       setDirectoryTick((t) => t + 1);
     } catch {}
-    syncGlobalUserOfficeMapFromCloud()
-      .then(() => {
-        setDirectoryTick((t) => t + 1);
-      })
-      .catch(() => {});
+    if (!hasSyncedCloudMapRef.current) {
+      hasSyncedCloudMapRef.current = true;
+      syncGlobalUserOfficeMapFromCloud(false)
+        .then(() => {
+          setDirectoryTick((t) => t + 1);
+        })
+        .catch(() => {});
+    }
   }, [airmen]);
 
   // Secret 5-clicks within 3 seconds trigger on Office Emblem/Logo
@@ -234,7 +238,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const [regUnit, setRegUnit] = useState<string>('');
   const [regBase, setRegBase] = useState<string>('');
   const [regSlogan, setRegSlogan] = useState<string>('');
-  const [regLogo, setRegLogo] = useState<string>('/155-uasu-baf-logo.png');
+  const [regLogo, setRegLogo] = useState<string>('/office-management-logo.png?v=15');
   // Step 2: User Info (ONLY the 6 requested fields, all empty by default)
   const [regBdNo, setRegBdNo] = useState<string>('');
   const [regFullName, setRegFullName] = useState<string>('');
@@ -319,7 +323,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
 
   const displayedOfficeLogo = useMemo(() => {
-    if (!cleanTypedBd) return '/office-management-logo.jpg';
+    if (!cleanTypedBd) return '/office-management-logo.png?v=15';
     if (isMasterUserTyped) {
       return selectedMasterOffice?.officeLogo || '/155-uasu-baf-logo.png';
     }
@@ -329,12 +333,12 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     if (matchedPendingRequest?.officeLogo) {
       return matchedPendingRequest.officeLogo;
     }
-    return '/office-management-logo.jpg';
+    return '/office-management-logo.png?v=15';
   }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
 
   // While on Login Portal (unauthenticated), keep Browser Address Bar synced to Default Office Management Application
   useEffect(() => {
-    syncBrowserTabIdentity('', '/office-management-logo.jpg', '');
+    syncBrowserTabIdentity('', '/office-management-logo.png?v=15', '');
   }, []);
 
   const displayedOfficeSubtitle = useMemo(() => {
@@ -977,7 +981,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         wing: '',
         officeBase: regBase.trim(),
         officeSlogan: regSlogan.trim() || 'Intel • Surveillance • Strike',
-        officeLogo: regLogo || '/155-uasu-baf-logo.png',
+        officeLogo: regLogo || '/office-management-logo.png?v=15',
         bdNo: cleanRegBdDigits,
         rank: 'LAC' as Rank,
         fullName: regFullName.trim(),

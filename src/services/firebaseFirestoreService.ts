@@ -762,7 +762,7 @@ export async function fetchSyncManifestFromFirebase(force: boolean = false): Pro
   if (
     !force &&
     manifestDocId === lastManifestFetchDocId &&
-    now - lastManifestFetchAt < 15000 &&
+    now - lastManifestFetchAt < 60000 &&
     cachedManifestResult
   ) {
     return cachedManifestResult;
@@ -910,7 +910,7 @@ function ensureSharedManifestListener() {
   void pollSharedManifestOnce();
   sharedManifestTimer = setInterval(() => {
     void pollSharedManifestOnce();
-  }, 180 * 1000);
+  }, 600 * 1000); // 10 minutes background manifest poll
 }
 
 export function subscribeToSyncManifest(

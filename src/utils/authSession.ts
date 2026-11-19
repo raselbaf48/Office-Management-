@@ -104,7 +104,7 @@ export function isMasterPinMatch(providedPin: string, storedPin?: string): boole
 }
 
 export function buildMasterOwnerUserRecord(): DetailedUserLogin {
-  const nowIso = new Date().toISOString();
+  const staticIso = '2026-01-01T00:00:00.000Z';
   const activeMasterId = getMasterUserId();
   const activeMasterPin = getMasterUserPin();
   return {
@@ -124,10 +124,10 @@ export function buildMasterOwnerUserRecord(): DetailedUserLogin {
     isProtected: true,
     status: 'ACTIVE',
     detailOrder: 'MASTER-OWNER-PROTECTED',
-    detailedAt: nowIso,
+    detailedAt: staticIso,
     detailedBy: 'System Auto-Provision',
     remarks: 'Protected System Master Owner Account',
-    updatedAt: nowIso,
+    updatedAt: staticIso,
   };
 }
 
@@ -298,7 +298,7 @@ export const getDetailedUsers = (nominalAirmen: Airman[] = []): DetailedUserLogi
           adminPass: '',
           status: a.active === false ? 'SUSPENDED' : 'ACTIVE',
           detailOrder: 'DO-OFFICE/GEN/2026',
-          detailedAt: new Date().toISOString(),
+          detailedAt: '2026-01-01T00:00:00.000Z',
           detailedBy: 'System Auto Sync',
           remarks: 'Auto-synced from Nominal Roll',
         });
@@ -333,16 +333,19 @@ export async function provisionMasterOwnerInOffice(nominalAirmen: Airman[] = [])
     (u) => (u.userId || u.bdNo || '').replace(/^BD\/?/i, '').trim() === MASTER_USER_ID
   );
   if (idx >= 0) {
-    users[idx] = { ...users[idx], ...masterUser };
+    const existing = users[idx];
+    if (
+      existing.role === 'master_owner' &&
+      existing.pin === masterUser.pin &&
+      existing.userId === masterUser.userId
+    ) {
+      return existing;
+    }
+    users[idx] = { ...existing, ...masterUser };
   } else {
     users.unshift(masterUser);
   }
-  saveDetailedUsers(users, true);
-  try {
-    await pushUserProfilesToFirebase([masterUser]);
-  } catch {
-    // Saved in local queue if offline
-  }
+  saveDetailedUsers(users, false);
   return masterUser;
 }
 
@@ -982,44 +985,14 @@ export const recordLoginLog = async (airman: Airman, role: string = 'USER'): Pro
       window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: cachedLoginHistory }));
     }
 
-    // Merge & persist to Firebase app_settings/baf_user_login_history without overwriting concurrent device logins
+    // Persist to Firebase app_settings/baf_user_login_history without an extra getDoc read on every login
     if (isFirebaseConfigured && db && !isFirestoreQuotaExceeded()) {
       (async () => {
         try {
           const prefix = getOfficeFirestoreDocPrefix();
           const docId = prefix ? `${prefix}baf_user_login_history` : 'baf_user_login_history';
           const histRef = doc(db, 'app_settings', docId);
-          let cloudLogs: UserLoginLog[] = [];
-          try {
-            const snap = await getDoc(histRef);
-            if (snap.exists()) {
-              const d = snap.data() as any;
-              if (Array.isArray(d?.value)) {
-                cloudLogs = d.value;
-              } else if (typeof d?.value === 'string') {
-                const parsed = JSON.parse(d.value);
-                if (Array.isArray(parsed)) cloudLogs = parsed;
-              }
-            }
-          } catch {}
-
-          const mergedMap = new Map<string, UserLoginLog>();
-          [newLog, ...cloudLogs, ...cachedLoginHistory].forEach((item) => {
-            if (item && item.id && !mergedMap.has(item.id)) {
-              mergedMap.set(item.id, item);
-            }
-          });
-          const merged = Array.from(mergedMap.values())
-            .sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime())
-            .slice(0, 100);
-
-          cachedLoginHistory = merged;
-          try {
-            localStorage.setItem(histStorageKey, JSON.stringify(merged));
-          } catch {}
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: merged }));
-          }
+          const merged = cachedLoginHistory.slice(0, 100);
 
           await setDoc(
             histRef,

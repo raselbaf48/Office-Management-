@@ -121,7 +121,7 @@ export default function App() {
       const activeId = getActiveOfficeIdentity();
       syncBrowserTabIdentity(activeId.officeName, activeId.officeLogo, activeId.officeBase);
     } else {
-      syncBrowserTabIdentity('', '/office-management-logo.jpg', '');
+      syncBrowserTabIdentity('', '/office-management-logo.png?v=15', '');
     }
   }, [userSession, officeIdentity]);
 

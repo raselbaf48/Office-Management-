@@ -5,31 +5,31 @@
   "description": "Centralized Multi-Office Management Application for personnel duty register, parade state tracker, TDY register, and monthly roster management.",
   "icons": [
     {
-      "src": "/office-management-logo.jpg?v=11",
-      "type": "image/jpeg",
+      "src": "/office-management-logo.png?v=15",
+      "type": "image/png",
       "sizes": "512x512",
       "purpose": "any"
     },
     {
-      "src": "/pwa-192x192.png?v=11",
+      "src": "/pwa-192x192.png?v=15",
       "type": "image/png",
       "sizes": "192x192",
       "purpose": "any"
     },
     {
-      "src": "/pwa-512x512.png?v=11",
+      "src": "/pwa-512x512.png?v=15",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "any"
     },
     {
-      "src": "/pwa-mobile-maskable-192x192.png?v=11",
+      "src": "/pwa-mobile-maskable-192x192.png?v=15",
       "type": "image/png",
       "sizes": "192x192",
       "purpose": "maskable"
     },
     {
-      "src": "/pwa-mobile-maskable-512x512.png?v=11",
+      "src": "/pwa-mobile-maskable-512x512.png?v=15",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "maskable"

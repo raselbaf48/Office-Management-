@@ -280,9 +280,9 @@ function getYesterdayDateStr(dateStr: string): string {
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-const SINGLE_USER_BACKUP_INTERVAL_MS = 12000; // 12 seconds trailing debounce to batch edits
-const MULTI_USER_BACKUP_INTERVAL_MS = 6000; // 6 seconds trailing debounce to batch edits
-const MULTI_USER_POLL_INTERVAL_MS = 45000; // 45 seconds safety check ticker
+const SINGLE_USER_BACKUP_INTERVAL_MS = 60000; // 60 seconds trailing debounce to batch edits
+const MULTI_USER_BACKUP_INTERVAL_MS = 15000; // 15 seconds trailing debounce to batch edits
+const MULTI_USER_POLL_INTERVAL_MS = 180000; // 3 minutes safety check ticker
 const LAST_FIREBASE_PULL_KEY = 'baf_last_firebase_pull_at';
 const LAST_HANDLED_REVISION_KEY = 'baf_last_handled_sync_revision';
 const SETTING_PREFIXES = ['baf_', 'savedDisposalKeys', 'parade_historical', 'flg_wg_'];
@@ -464,12 +464,16 @@ export class LocalDatabaseEngine {
         try {
           hasSession = Boolean(window.sessionStorage.getItem('baf_user_session'));
         } catch {}
-        // Only run Firebase boot pull & attach manifest listener if already authenticated or local airmen DB is empty
-        if (hasSession || (this.db.airmen || []).length === 0) {
+        const lastPullMs = this.parseTimeMs(this.lastPullAt);
+        const recentlyPulled = lastPullMs > 0 && Date.now() - lastPullMs < 10 * 60 * 1000;
+        // Only run Firebase boot pull if authenticated (and not pulled within 10 mins) or local airmen DB is empty
+        if ((hasSession && !recentlyPulled) || (this.db.airmen || []).length === 0) {
           this.syncFromFirebase({ isLoginSync: false });
-          if (hasSession) {
-            this.attachManifestListener();
-          }
+        } else if (hasSession) {
+          this.isInitialPullDone = true;
+        }
+        if (hasSession) {
+          this.attachManifestListener();
         }
       }, 1000);
 
@@ -681,11 +685,12 @@ export class LocalDatabaseEngine {
       if (!res.ok) return false;
       const settings = await res.json();
       if (Array.isArray(settings) && settings.length > 0) {
+        const pendingSettings = getPendingDeltaQueue().settings || {};
         settings.forEach((s: any) => {
           if (s && s.setting_key && s.setting_value !== undefined) {
             const val = typeof s.setting_value === 'string' ? s.setting_value : JSON.stringify(s.setting_value);
             localStorage.setItem(s.setting_key, val);
-            if (!this.isInitialPullDone && isSyncableSettingKey(s.setting_key)) {
+            if (!pendingSettings[s.setting_key] && isSyncableSettingKey(s.setting_key)) {
               lastSyncedSettingsMap.set(s.setting_key, val);
             }
           }
@@ -768,7 +773,7 @@ export class LocalDatabaseEngine {
       if (changed) {
         this.db.lastUpdated = new Date().toISOString();
         this.saveToStorage(this.db, true, false, false);
-        if (!this.isInitialPullDone && !hasPendingDeltas()) {
+        if (!hasPendingDeltas()) {
           this.lastSyncedDbStr = this.stripTimestampForCompare(this.db);
         }
         window.dispatchEvent(new CustomEvent('baf_data_updated'));
@@ -979,22 +984,24 @@ export class LocalDatabaseEngine {
       }, 45000);
 
       try {
-      // Skip duplicate login sync if boot sync already completed cleanly within 20 seconds
+      // Skip duplicate boot/login sync if a pull already completed within the last 10 minutes
+      const lastPullAgeMs = this.lastPullAt ? Date.now() - this.parseTimeMs(this.lastPullAt) : Infinity;
       if (
-        options?.isLoginSync &&
         !options?.forceFullPull &&
         !options?.isQuotaRecovery &&
         !isFirestoreQuotaExceeded() &&
-        this.isInitialPullDone &&
-        this.lastPullAt &&
-        Date.now() - this.parseTimeMs(this.lastPullAt) < 20000
+        !hasPendingDeltas() &&
+        (this.db.airmen || []).length > 0 &&
+        lastPullAgeMs >= 0 &&
+        lastPullAgeMs < 10 * 60 * 1000
       ) {
+        this.isInitialPullDone = true;
         return true;
       }
 
       // On login or manual sync, verify Firebase health & quota live from server
       if (options?.isLoginSync || options?.isQuotaRecovery || isFirestoreQuotaExceeded()) {
-        const probe = await probeFirebaseConnectionAndQuota(Boolean(options?.isLoginSync || options?.isQuotaRecovery));
+        const probe = await probeFirebaseConnectionAndQuota(Boolean(options?.isQuotaRecovery));
         if (probe.quotaExceeded || isFirestoreQuotaExceeded()) {
           await this.pullDatabaseFromServer();
           await this.pullAllSettingsFromServer();
@@ -1032,26 +1039,29 @@ export class LocalDatabaseEngine {
 
       emitSyncProgress(15, 'Checking Firebase sync manifest...');
 
+      const hasLocalAirmen = (this.db.airmen || []).length > 0;
+      const hasLocalAssignments = Object.values(this.db.assignments || {}).some(
+        (arr) => Array.isArray(arr) && arr.length > 0
+      );
+
       const canUseIncremental =
         !options?.forceFullPull &&
-        Boolean(this.lastPullAt) &&
-        (this.db.airmen || []).length > 0;
+        hasLocalAirmen;
 
       const manifest = canUseIncremental ? await fetchSyncManifestFromFirebase() : null;
       const manifestMs = manifest?.updatedAt ? this.parseTimeMs(manifest.updatedAt) : 0;
       const lastPullMs = this.lastPullAt ? this.parseTimeMs(this.lastPullAt) : 0;
 
-      const officeCols = ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'];
-
-      // Ultra-fast path: ONLY skip when manifest updatedAt <= lastPullAt and no local pending deltas exist
+      // Ultra-fast path: skip when manifest updatedAt <= lastPullAt (or manifest doesn't exist yet while local data is present) and no local pending deltas exist
       if (
         canUseIncremental &&
-        manifest &&
         !hasPendingDeltas() &&
-        manifestMs > 0 &&
-        manifestMs <= lastPullMs
+        ((manifest && manifestMs > 0 && lastPullMs > 0 && manifestMs <= lastPullMs) ||
+          (!manifest && lastPullMs > 0))
       ) {
-        this.recordHandledRevision(manifest.revision);
+        if (manifest?.revision) {
+          this.recordHandledRevision(manifest.revision);
+        }
         this.lastSyncedDbStr = this.stripTimestampForCompare(this.db);
         this.seedBaselineSettingsMap();
         const nowIso = new Date().toISOString();
@@ -1070,11 +1080,13 @@ export class LocalDatabaseEngine {
         return true;
       }
 
-      // Subtract 10-second clock-skew overlap instead of 5 minutes so bulk duty writes are not re-downloaded repeatedly
+      // Subtract 10-second clock-skew overlap; if lastPullAt wasn't recorded yet but local assignments already exist,
+      // fallback to a 24-hour window so we NEVER do a 3,000+ document full scan of duty_assignments unless forceFullPull is requested
+      const fallbackRecentIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const overlapIso = lastPullMs > 0
         ? new Date(Math.max(0, lastPullMs - 10 * 1000)).toISOString()
-        : this.lastPullAt;
-      const useSinceIso = canUseIncremental && manifest ? overlapIso : undefined;
+        : (this.lastPullAt || (hasLocalAssignments ? fallbackRecentIso : undefined));
+      const useSinceIso = canUseIncremental ? overlapIso : undefined;
       emitSyncProgress(30, useSinceIso ? 'Fetching recent changes from Firebase...' : 'Fetching database from Firebase Firestore...');
 
       let fbAirmen: any[] = [];
@@ -1084,12 +1096,15 @@ export class LocalDatabaseEngine {
       let fbSettingsMeta: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }> = {};
 
       if (useSinceIso) {
+        const changedCols = Array.isArray(manifest?.changedCollections) && manifest!.changedCollections!.length > 0
+          ? manifest!.changedCollections!
+          : ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'];
         [fbAirmen, fbAssignments, fbHistory, fbUsers, fbSettingsMeta] = await Promise.all([
-          fetchAirmenFromFirebase(useSinceIso),
-          fetchDutyAssignmentsFromFirebase(useSinceIso),
-          fetchParadeStatesFromFirebase(useSinceIso),
-          fetchUserProfilesFromFirebase(useSinceIso),
-          fetchAppSettingsWithMetaFromFirebase(useSinceIso),
+          changedCols.includes('airmen') ? fetchAirmenFromFirebase(useSinceIso) : Promise.resolve([]),
+          changedCols.includes('duty_assignments') ? fetchDutyAssignmentsFromFirebase(useSinceIso) : Promise.resolve([]),
+          changedCols.includes('parade_states') ? fetchParadeStatesFromFirebase(useSinceIso) : Promise.resolve([]),
+          changedCols.includes('user_profiles') ? fetchUserProfilesFromFirebase(useSinceIso) : Promise.resolve([]),
+          changedCols.includes('app_settings') ? fetchAppSettingsWithMetaFromFirebase(useSinceIso) : Promise.resolve({}),
         ]);
       } else {
         // Fetch lightweight collections first so the large duty_assignments payload does not starve them
@@ -1099,7 +1114,7 @@ export class LocalDatabaseEngine {
           fetchUserProfilesFromFirebase(),
           fetchAppSettingsWithMetaFromFirebase(),
         ]);
-        fbAssignments = await fetchDutyAssignmentsFromFirebase();
+        fbAssignments = await fetchDutyAssignmentsFromFirebase(hasLocalAssignments ? fallbackRecentIso : undefined);
       }
 
       emitSyncProgress(60, 'Reconciling cloud & local records...');
@@ -1561,9 +1576,10 @@ export class LocalDatabaseEngine {
     if (this.isFirebaseSyncing || this.isPushing) return false;
 
     const lastPullMs = this.parseTimeMs(this.lastPullAt);
+    const fallbackSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const since = lastPullMs > 0
       ? new Date(Math.max(0, lastPullMs - 10 * 1000)).toISOString()
-      : (this.lastPullAt || undefined);
+      : (this.lastPullAt || fallbackSince);
     const targets = changedCollections && changedCollections.length > 0
       ? changedCollections
       : ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'];
@@ -1789,13 +1805,19 @@ export class LocalDatabaseEngine {
         lastSyncedDb = JSON.parse(this.lastSyncedDbStr || '{}');
       } catch {}
 
+      const stripVolatileFields = (obj: any) => {
+        if (!obj || typeof obj !== 'object') return obj;
+        const { updatedAt: _u, updated_at: _ua, detailedAt: _d, lastLoginAt: _l, ...rest } = obj;
+        return rest;
+      };
+
       const changedAirmen = (currDb.airmen || []).filter((a) => {
         if (!lastSyncedDb.airmen) return true;
         const cleanBd = String(a.bdNo || '').replace(/\D/g, '');
         const prev = lastSyncedDb.airmen.find(
           (p: any) => p.id === a.id || (cleanBd && p.bdNo && String(p.bdNo).replace(/\D/g, '') === cleanBd)
         );
-        return !prev || JSON.stringify(prev) !== JSON.stringify(a);
+        return !prev || JSON.stringify(stripVolatileFields(prev)) !== JSON.stringify(stripVolatileFields(a));
       });
 
       const changedAssignments: any[] = [];
@@ -1839,13 +1861,13 @@ export class LocalDatabaseEngine {
       const changedHistory = (currDb.activityHistory || []).filter((h) => {
         if (!lastSyncedDb.activityHistory) return true;
         const prev = lastSyncedDb.activityHistory.find((p: any) => p.id === h.id);
-        return !prev || JSON.stringify(prev) !== JSON.stringify(h);
+        return !prev || JSON.stringify(stripVolatileFields(prev)) !== JSON.stringify(stripVolatileFields(h));
       });
 
       const changedUsers = (currDb.detailedUsers || []).filter((u) => {
         if (!lastSyncedDb.detailedUsers) return true;
-        const prev = lastSyncedDb.detailedUsers.find((p: any) => p.id === u.id);
-        return !prev || JSON.stringify(prev) !== JSON.stringify(u);
+        const prev = lastSyncedDb.detailedUsers.find((p: any) => p.id === u.id || (u.bdNo && p.bdNo === u.bdNo));
+        return !prev || JSON.stringify(stripVolatileFields(prev)) !== JSON.stringify(stripVolatileFields(u));
       });
 
       const settingsSnap = this.getSyncableSettingsSnapshot();
