@@ -7,7 +7,7 @@ import { sortAirmenBySeniority } from '../utils/seniority';
 import { exportTableToCSV } from '../utils/csvExport';
 import { getOptimalMinColumnWidth } from '../utils/tableUtils';
 import { EntryHistoryModal } from './EntryHistoryModal';
-import { getAirmanDisposalForRange } from '../utils/airmanDisposalHelper';
+import { getAirmanDisposalForRange, matchAirmanId } from '../utils/airmanDisposalHelper';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
 import { getAvailableTrades } from '../utils/tradeList';
@@ -156,7 +156,7 @@ export const DeploymentRegisterView: React.FC<DeploymentRegisterViewProps> = ({
       Object.keys(recordMap).forEach((airmanId) => {
         const rec = recordMap[airmanId];
         const airmanAttAssignments = allAssignments
-          .filter((ass: any) => ass && ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(ass.dutyCode) && ass.airmanId === airmanId && ass.date)
+          .filter((ass: any) => ass && ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(ass.dutyCode) && matchAirmanId(ass.airmanId, airmanId) && ass.date)
           .reduce((acc: any[], curr: any) => {
             // Because we now store both deployment and base duties, 
             // deduplicate by date so we don't count the same day twice for deployments

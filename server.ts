@@ -127,18 +127,56 @@ function loadDatabase(): LocalDB {
           if (a && a.bdNo) existingMap.set(a.bdNo, a);
         });
 
+        // Build lookup map from legacy airman-1..48 and BD_<digits> to canonical BD/<digits>
+        const legacyIdToCanonical = new Map<string, string>();
+        INITIAL_AIRMEN.forEach((initA) => {
+          if (initA.serNo) {
+            legacyIdToCanonical.set(`airman-${initA.serNo}`, initA.id);
+          }
+          const digits = String(initA.bdNo || initA.id || '').replace(/\D/g, '');
+          if (digits) {
+            legacyIdToCanonical.set(digits, initA.id);
+            legacyIdToCanonical.set(`bd/${digits}`, initA.id);
+            legacyIdToCanonical.set(`bd_${digits}`, initA.id);
+            legacyIdToCanonical.set(`airman-${digits}`, initA.id);
+          }
+        });
+        const normalizeAirId = (rawId: any): string => {
+          if (!rawId) return '';
+          const s = String(rawId).trim();
+          const low = s.toLowerCase();
+          if (legacyIdToCanonical.has(low)) return legacyIdToCanonical.get(low)!;
+          const m = s.match(/^BD[_\/](\d+)$/i);
+          if (m) return `BD/${m[1]}`;
+          const d = s.replace(/\D/g, '');
+          if (d.length >= 4) return `BD/${d}`;
+          return s;
+        };
+
         // Ensure baseline airmen exist while giving 100% priority to user's saved edits
         const finalAirmen: Airman[] = [];
         INITIAL_AIRMEN.forEach((initA) => {
           const existing = existingMap.get(initA.id) || existingMap.get(initA.bdNo);
           if (existing) {
-            finalAirmen.push({
+            const mergedAirman: Airman = {
               ...initA,
               ...existing,
+              id: initA.id,
+              bdNo: existing.bdNo || initA.bdNo,
+              serNo: existing.serNo || initA.serNo,
+              code: existing.code || initA.code,
+              addressBlock: existing.addressBlock || initA.addressBlock,
+              mobileNo: existing.mobileNo || initA.mobileNo,
+              permanentAddress: existing.permanentAddress || initA.permanentAddress,
+              bloodGroup: existing.bloodGroup || initA.bloodGroup,
               fullName: (existing.fullName && existing.fullName !== existing.name) ? existing.fullName : (initA.fullName || existing.fullName || existing.name),
               flightName: existing.flightName || (existing as any).flight || (existing as any).Flight || initA.flightName || 'Admin',
               email: (existing as any).email || (existing as any).gmail || undefined,
-            });
+            };
+            if (!existing.mobileNo || !existing.addressBlock || !existing.serNo || existing.id !== initA.id) {
+              needsSave = true;
+            }
+            finalAirmen.push(mergedAirman);
           } else {
             finalAirmen.push(initA);
             needsSave = true;
@@ -160,6 +198,16 @@ function loadDatabase(): LocalDB {
         if (!parsed.activityHistory || !Array.isArray(parsed.activityHistory)) {
           parsed.activityHistory = [];
           needsSave = true;
+        } else {
+          parsed.activityHistory.forEach((h: any) => {
+            if (h && h.airmanId && h.airmanId !== 'ALL' && h.airmanId !== 'BULK_AIRMEN') {
+              const norm = normalizeAirId(h.airmanId);
+              if (norm && norm !== h.airmanId) {
+                h.airmanId = norm;
+                needsSave = true;
+              }
+            }
+          });
         }
         if (!parsed.adminPasscode) {
           parsed.adminPasscode = '1124';
@@ -177,20 +225,36 @@ function loadDatabase(): LocalDB {
           parsed.assignments['2026-08'] = generateOfficialMonthAssignments(2026, 8);
           needsSave = true;
         }
-        // Clean corrupted records and any placeholder notes in assignments
+        // Clean corrupted records, normalize airmanId to BD/<bdNo>, deduplicate, and strip placeholder notes
         Object.keys(parsed.assignments || {}).forEach((k) => {
           if (Array.isArray(parsed.assignments[k])) {
-            const beforeLen = parsed.assignments[k].length;
-            parsed.assignments[k] = parsed.assignments[k].filter((a: any) => !isCorruptedAssignmentRecord(a));
-            if (parsed.assignments[k].length !== beforeLen) {
-              needsSave = true;
-            }
+            const seenKey = new Set<string>();
+            const cleanedList: DutyAssignment[] = [];
             parsed.assignments[k].forEach((a: any) => {
+              if (isCorruptedAssignmentRecord(a)) {
+                needsSave = true;
+                return;
+              }
+              const normId = normalizeAirId(a.airmanId);
+              if (normId && normId !== a.airmanId) {
+                a.airmanId = normId;
+                needsSave = true;
+              }
               if (a.notes && typeof a.notes === 'string' && a.notes.toLowerCase().includes('imported')) {
                 a.notes = '';
                 needsSave = true;
               }
+              const shiftKey = a.idaShift || a.shift || 'n';
+              const scopeKey = a.disposalScope || 'ALL';
+              const dedupKey = `${a.airmanId}_${a.date}_${a.dutyCode}_${shiftKey}_${scopeKey}`;
+              if (!seenKey.has(dedupKey)) {
+                seenKey.add(dedupKey);
+                cleanedList.push(a);
+              } else {
+                needsSave = true;
+              }
             });
+            parsed.assignments[k] = cleanedList;
           }
         });
         cachedDb = parsed as LocalDB;
@@ -652,11 +716,21 @@ async function startServer() {
     const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
     const shift = (req.query.shift as string) || 'Morning';
     const flight = (req.query.flight as string) || 'Overall';
+    const stateType = (req.query.stateType as string) || 'PARADE';
+    const isPT = stateType === 'PT' || shift === 'PT';
+    const isNightCount = stateType === 'NIGHT_COUNT' || shift === 'Night';
     const db = loadDatabase();
     const allAirmen = (db.airmen || []).filter((a: any) => a.active !== false);
     const targetAirmen = flight === 'Overall' ? allAirmen : allAirmen.filter((a: any) => a.flightName === flight);
     const monthKey = date.slice(0, 7);
     const dateAssignments = (db.assignments?.[monthKey] || []).filter((a: any) => a.date === date);
+
+    const [yr, mo, da] = date.split('-').map(Number);
+    const yestObj = new Date(Date.UTC(yr, (mo || 1) - 1, da || 1));
+    yestObj.setUTCDate(yestObj.getUTCDate() - 1);
+    const yestStr = `${yestObj.getUTCFullYear()}-${String(yestObj.getUTCMonth() + 1).padStart(2, '0')}-${String(yestObj.getUTCDate()).padStart(2, '0')}`;
+    const yestMonthKey = yestStr.slice(0, 7);
+    const yestAssignments = (db.assignments?.[yestMonthKey] || []).filter((a: any) => a.date === yestStr);
 
     let onParade = 0;
     let onDuty = 0;
@@ -666,38 +740,70 @@ async function startServer() {
 
     const personnelStatusList = targetAirmen.map((airman: any) => {
       const airDigits = String(airman.bdNo || airman.id || '').replace(/\D/g, '');
-      const match = dateAssignments.find((a: any) => {
+      const matchAirman = (a: any) => {
         if (a.airmanId === airman.id || a.airmanId === airman.bdNo) return true;
         const aNorm = String(a.airmanId || '').replace(/[\/_]/g, '');
         const airNorm = String(airman.id || airman.bdNo || '').replace(/[\/_]/g, '');
         if (aNorm && airNorm && aNorm === airNorm) return true;
         const aDigits = String(a.airmanId || '').replace(/\D/g, '');
         return Boolean(airDigits && aDigits && aDigits === airDigits);
-      });
-      const dutyCode = String(match?.dutyCode || 'ON_PARADE').trim() || 'ON_PARADE';
-      const codeUpper = dutyCode.toUpperCase();
+      };
+      const matchesToday = dateAssignments.filter(matchAirman);
+      const isRecIdacNt = (rec: any) => {
+        const c = String(rec?.dutyCode || '').toUpperCase().trim();
+        if (!['IDAC', 'IDA', 'IDA C', 'IDA_C'].includes(c)) return false;
+        const sh = String(rec?.idaShift || rec?.shift || rec?.notes || '').toLowerCase();
+        return sh.includes('night') || sh.includes('nt') || sh === 'c';
+      };
+      let match = matchesToday[0];
+      if (matchesToday.length > 1) {
+        if (isPT || isNightCount) {
+          match = matchesToday.find(isRecIdacNt) || matchesToday.find((r: any) => r.dutyCode !== 'ON_PARADE') || matchesToday[0];
+        } else {
+          match = matchesToday.find((r: any) => !isRecIdacNt(r) && r.dutyCode !== 'ON_PARADE') || matchesToday[0];
+        }
+      }
+
+      let dutyCode = String(match?.dutyCode || 'ON_PARADE').trim() || 'ON_PARADE';
+      let codeUpper = dutyCode.toUpperCase();
       const isIdac = ['IDAC', 'IDA', 'IDA C', 'IDA_C'].includes(codeUpper);
-      const isIdacNt = isIdac && (
-        String(match?.idaShift || (match as any)?.shift || '').toLowerCase().includes('night') ||
-        String(match?.idaShift || (match as any)?.shift || '').toLowerCase().includes('nt') ||
-        String(match?.notes || '').toLowerCase().includes('night') ||
-        String(match?.notes || '').toLowerCase().includes('nt')
-      );
+      const isIdacNt = isIdac && isRecIdacNt(match);
       const isBaseParade = ['ON_PARADE', 'PT', 'PT_PARADE', 'P', 'PRESENT'].includes(codeUpper);
+
+      let yestOffLabel = '';
+      if (!isPT && !isNightCount && (isBaseParade || isIdacNt)) {
+        const yestMatch = yestAssignments.find((a: any) => matchAirman(a) && !['ON_PARADE', 'PT', 'PT_PARADE'].includes(String(a.dutyCode || '').toUpperCase()));
+        if (yestMatch) {
+          const yCode = String(yestMatch.dutyCode || '').toUpperCase().trim();
+          if (['GD', 'SY', 'SY_DUTY', 'SECURITY', 'GUARD_DUTY'].includes(yCode)) yestOffLabel = 'SY Off';
+          else if (yCode === 'BTF') yestOffLabel = 'BTF Off';
+          else if (yCode === 'NTF') yestOffLabel = 'NTF Off';
+          else if (yCode === 'AIRPORT' || yCode === 'AIRFIELD') yestOffLabel = 'Airfield Off';
+          else if (yCode === 'HALISHAHAR') yestOffLabel = 'Halishahar Off';
+          else if (yCode === 'ESCORT' || yCode === 'ESC' || yCode === 'ESCT' || yCode.includes('1794394')) yestOffLabel = 'Esct Off';
+          else if (isRecIdacNt(yestMatch)) yestOffLabel = 'IDAC Nt Off';
+        }
+      }
+
+      if (yestOffLabel) {
+        dutyCode = 'DUTY_OFF';
+        codeUpper = 'DUTY_OFF';
+      }
+
       const isGenuineDuty =
         ['GD', 'SY', 'SY_DUTY', 'SECURITY', 'GUARD_DUTY', 'BTF', 'NTF', 'HALISHAHAR', 'AIRPORT', 'AIRFIELD', 'AIR_FD', 'ESCORT', 'ESC', 'ESCT'].includes(codeUpper) ||
         codeUpper.startsWith('CUST_') ||
         isIdac;
       let statusCategory = 'PARADE';
-      if (isBaseParade || (shift === 'Morning' && isIdacNt)) {
+      if (codeUpper === 'DUTY_OFF' || codeUpper === 'OFF') {
+        otherOff++; statusCategory = 'OFF';
+      } else if (isBaseParade || (!isPT && !isNightCount && isIdacNt)) {
         onParade++;
         statusCategory = 'PARADE';
       } else if (codeUpper === 'LEAVE') {
         onLeave++; statusCategory = 'LEAVE';
       } else if (['TDY', 'ATT', 'DETT'].includes(codeUpper)) {
         tdy++; statusCategory = 'TDY';
-      } else if (codeUpper === 'DUTY_OFF' || codeUpper === 'OFF') {
-        otherOff++; statusCategory = 'OFF';
       } else if (['BAKE_N_BITE', 'CANTEEN', 'RECEPTION', 'GUARD_OF_HONOUR', 'SICK_REPORT', 'SICK', 'EX_PPGF', 'ED', 'CMH', 'BNS', 'BSH', 'ESSN', 'ADMIN_ORDER', 'CAT_C', 'DRILL_CAT_C', 'CLASS_TRG', 'GAMES', 'GH', 'ABSENT', 'AWL'].includes(codeUpper)) {
         otherOff++; statusCategory = codeUpper;
       } else if (isGenuineDuty) {
@@ -706,7 +812,7 @@ async function startServer() {
         otherOff++; statusCategory = 'OTHERS';
       }
 
-      let dutyName = dutyCode === 'ON_PARADE' ? 'On Parade' : dutyCode;
+      let dutyName = yestOffLabel || (dutyCode === 'ON_PARADE' ? (isPT ? 'On PT' : 'On Parade') : dutyCode);
       const isCustomCode = dutyCode.startsWith('CUST_') || dutyCode.startsWith('cust_') || dutyCode.includes('1794394');
       if (isCustomCode) {
         if ((match as any)?.dutyName && !(match as any).dutyName.startsWith('CUST_')) {
@@ -767,9 +873,10 @@ async function startServer() {
         airman,
         dutyCode,
         dutyName,
+        previousDutyName: yestOffLabel || undefined,
         idaShift: match?.idaShift || (match as any)?.shift,
         statusCategory,
-        notes: match?.notes || ''
+        notes: yestOffLabel || match?.notes || ''
       };
     });
 
@@ -910,6 +1017,7 @@ async function startServer() {
       } else {
         index = list.findIndex((a: any) =>
           matchAirmanId(a.airmanId) && a.date === dateStr &&
+          !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && (a.idaShift === 'Night' || a.shift === 'Night')) &&
           (a.disposalScope || 'ALL') === scope
         );
       }

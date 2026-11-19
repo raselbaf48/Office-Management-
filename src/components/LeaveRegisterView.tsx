@@ -6,7 +6,7 @@ import { Calendar, Search, Filter, Printer, Download, Eye, ShieldCheck, Sun, Moo
 import { sortAirmenBySeniority } from '../utils/seniority';
 import { getOptimalMinColumnWidth } from '../utils/tableUtils';
 import { EntryHistoryModal } from './EntryHistoryModal';
-import { getAirmanDisposalForRange } from '../utils/airmanDisposalHelper';
+import { getAirmanDisposalForRange, matchAirmanId } from '../utils/airmanDisposalHelper';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
 import { getAvailableTrades } from '../utils/tradeList';
@@ -341,7 +341,7 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
       Object.keys(recordMap).forEach((airmanId) => {
         const rec = recordMap[airmanId];
         const airmanLeaveAssignments = allAssignments
-          .filter((ass: any) => ass && ass.dutyCode === 'LEAVE' && ass.airmanId === airmanId && ass.date)
+          .filter((ass: any) => ass && ass.dutyCode === 'LEAVE' && matchAirmanId(ass.airmanId, airmanId) && ass.date)
           .sort((a: any, b: any) => a.date.localeCompare(b.date));
 
         if (airmanLeaveAssignments.length === 0) return;

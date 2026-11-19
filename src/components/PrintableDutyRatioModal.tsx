@@ -9,6 +9,7 @@ import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { localDb } from '../services/localDatabase';
 import { calculateExactDutyRatios, roundDutyByRule } from '../utils/dutyDistribution';
 import { getActiveOfficeIdentity } from '../firebase';
+import { matchAirmanId } from '../utils/airmanDisposalHelper';
 
 export function formatDisplayDate(dateStr?: string): string {
   if (!dateStr) {
@@ -324,7 +325,7 @@ export const PrintableDutyRatioModal: React.FC<PrintableDutyRatioModalProps> = (
 
     return sgtAndBelow.map((a, idx) => {
       let defaultDisp = '-';
-      const myAssignments = assignments.filter(assign => assign.airmanId === a.id);
+      const myAssignments = assignments.filter(assign => matchAirmanId(assign.airmanId, a.id));
       if (myAssignments.some(assign => assign.dutyCode === 'BAKE_N_BITE')) {
         defaultDisp = 'Bake & Bite';
       } else if (myAssignments.some(assign => assign.dutyCode === 'CANTEEN')) {

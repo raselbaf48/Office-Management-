@@ -10,6 +10,7 @@ import { pushDutyListToCloud, pullDutyListFromCloud, DutySyncResult } from '../u
 import { getAirmanJoinDateISO, getAirmanLeftDateISO, normalizeDateToISO, formatShortDate } from '../utils/csvExport';
 import { sortAirmenBySeniority } from '../utils/seniority';
 import { getActiveOfficeIdentity } from '../firebase';
+import { matchAirmanId } from '../utils/airmanDisposalHelper';
 
 const STANDARD_DISPOSALS = [
   '-',
@@ -487,7 +488,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     airmen.forEach(a => {
       if (targetISO && !isAirmanInUnitOnDate(a, targetISO)) return;
 
-      const myAssignments = assignments.filter(assign => assign.airmanId === a.id);
+      const myAssignments = assignments.filter(assign => matchAirmanId(assign.airmanId, a.id));
       const bake = myAssignments.find(assign => assign.dutyCode === 'BAKE_N_BITE');
       const canteen = myAssignments.find(assign => assign.dutyCode === 'CANTEEN');
 

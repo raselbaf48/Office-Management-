@@ -345,7 +345,7 @@ export default function App() {
     setJustLoggedIn(false);
     handleRoleChange('USER');
     setLastUsedPortal('Office');
-    syncBrowserTabIdentity('', '/office-management-logo.jpg', '');
+    syncBrowserTabIdentity('', '/office-management-logo.png?v=15', '');
   };
 
   

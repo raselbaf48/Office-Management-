@@ -352,6 +352,58 @@ function isSyncableSettingKey(key: string): boolean {
   return SETTING_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
+const LEGACY_SER_TO_CANONICAL_ID = new Map<string, string>();
+INITIAL_AIRMEN.forEach((initA) => {
+  if (initA.serNo) {
+    LEGACY_SER_TO_CANONICAL_ID.set(`airman-${initA.serNo}`, initA.id);
+  }
+  const digits = String(initA.bdNo || initA.id || '').replace(/\D/g, '');
+  if (digits) {
+    LEGACY_SER_TO_CANONICAL_ID.set(digits, initA.id);
+    LEGACY_SER_TO_CANONICAL_ID.set(`bd/${digits}`, initA.id);
+    LEGACY_SER_TO_CANONICAL_ID.set(`bd_${digits}`, initA.id);
+    LEGACY_SER_TO_CANONICAL_ID.set(`airman-${digits}`, initA.id);
+  }
+});
+
+function normalizeCanonicalAirmanId(rawId: any): string {
+  if (!rawId) return '';
+  const s = String(rawId).trim();
+  const low = s.toLowerCase();
+  if (LEGACY_SER_TO_CANONICAL_ID.has(low)) {
+    return LEGACY_SER_TO_CANONICAL_ID.get(low)!;
+  }
+  const m = s.match(/^BD[_\/](\d+)$/i);
+  if (m) return `BD/${m[1]}`;
+  const d = s.replace(/\D/g, '');
+  if (d.length >= 4) return `BD/${d}`;
+  return s;
+}
+
+function enrichAirmanWithInitialBaseline(a: any, isDefault155: boolean): any {
+  if (!a || !isDefault155) return a;
+  const digits = String(a.bdNo || a.id || '').replace(/\D/g, '');
+  const initA = INITIAL_AIRMEN.find((i) => {
+    const iDigits = String(i.bdNo || i.id || '').replace(/\D/g, '');
+    return (iDigits && iDigits === digits) || i.id === a.id || i.bdNo === a.bdNo;
+  });
+  if (!initA) return a;
+  return {
+    ...initA,
+    ...a,
+    id: initA.id,
+    bdNo: a.bdNo || initA.bdNo,
+    serNo: a.serNo || initA.serNo,
+    code: a.code || initA.code,
+    addressBlock: a.addressBlock || initA.addressBlock,
+    mobileNo: a.mobileNo || initA.mobileNo,
+    permanentAddress: a.permanentAddress || initA.permanentAddress,
+    bloodGroup: a.bloodGroup || initA.bloodGroup,
+    fullName: (a.fullName && a.fullName !== a.name) ? a.fullName : (initA.fullName || a.fullName || a.name),
+    flightName: a.flightName || a.flight || a.Flight || initA.flightName || 'Admin',
+  };
+}
+
 function isCorruptedAssignmentRecord(a: any): boolean {
   if (!a || typeof a !== 'object') return true;
   const idStr = String(a.id || '').trim();
@@ -740,14 +792,18 @@ export class LocalDatabaseEngine {
         });
 
         if (this.db.airmen.length !== mergedAirmen.length) changed = true;
-        this.db.airmen = normalizeAirmenSeniority(mergedAirmen);
+        const enrichedMerged = mergedAirmen.map((a) => enrichAirmanWithInitialBaseline(a, true));
+        if (JSON.stringify(this.db.airmen) !== JSON.stringify(enrichedMerged)) changed = true;
+        this.db.airmen = normalizeAirmenSeniority(enrichedMerged);
       }
 
       // 2. Duty Assignments: only pull from local server if Firebase hasn't already completed initial pull or quota is full
       if (srvDb.assignments && typeof srvDb.assignments === 'object' && (!this.isInitialPullDone || isFirestoreQuotaExceeded())) {
         if (!this.db.assignments) this.db.assignments = {};
         Object.keys(srvDb.assignments).forEach((mKey) => {
-          const incoming = (srvDb.assignments[mKey] || []).filter((a: any) => !isCorruptedAssignmentRecord(a));
+          const incoming = (srvDb.assignments[mKey] || [])
+            .filter((a: any) => !isCorruptedAssignmentRecord(a))
+            .map((a: any) => ({ ...a, airmanId: normalizeCanonicalAirmanId(a.airmanId) }));
           if (JSON.stringify(this.db.assignments[mKey] || []) !== JSON.stringify(incoming)) {
             this.db.assignments[mKey] = incoming;
             changed = true;
@@ -1207,7 +1263,10 @@ export class LocalDatabaseEngine {
       });
 
       if (airmenMap.size > 0) {
-        newDb.airmen = normalizeAirmenSeniority(Array.from(airmenMap.values()));
+        const default155 = isDefault155UasuOffice();
+        newDb.airmen = normalizeAirmenSeniority(
+          Array.from(airmenMap.values()).map((a) => enrichAirmanWithInitialBaseline(a, default155))
+        );
       }
 
       // 2. Reconcile Duty Assignments (Incremental-aware + Skip identical redundant pushes)
@@ -1280,15 +1339,25 @@ export class LocalDatabaseEngine {
       });
 
       const assignmentsByMonth: Record<string, DutyAssignment[]> = {};
+      const seenAsnKeysByMonth: Record<string, Set<string>> = {};
       mergedAsnMap.forEach((entry) => {
         if (entry.isDeleted || !entry.item) return;
-        const a = { ...entry.item };
+        const a = { ...entry.item, airmanId: normalizeCanonicalAirmanId(entry.item.airmanId) };
         delete a.isDeleted;
         const dateStr = String(a.date || '');
         if (dateStr.length >= 7) {
           const ym = dateStr.slice(0, 7);
-          if (!assignmentsByMonth[ym]) assignmentsByMonth[ym] = [];
-          assignmentsByMonth[ym].push(a);
+          if (!assignmentsByMonth[ym]) {
+            assignmentsByMonth[ym] = [];
+            seenAsnKeysByMonth[ym] = new Set<string>();
+          }
+          const shiftKey = a.idaShift || (a as any).shift || 'n';
+          const scopeKey = a.disposalScope || 'ALL';
+          const dedupKey = `${a.airmanId}_${a.date}_${a.dutyCode}_${shiftKey}_${scopeKey}`;
+          if (!seenAsnKeysByMonth[ym].has(dedupKey)) {
+            seenAsnKeysByMonth[ym].add(dedupKey);
+            assignmentsByMonth[ym].push(a);
+          }
         }
       });
       if (useSinceIso || fbAssignments.length > 0 || Object.keys(pendingQueue.assignments).length > 0) {
@@ -1609,7 +1678,10 @@ export class LocalDatabaseEngine {
             map.set(k, { ...map.get(k), ...ca });
             dbChanged = true;
           });
-          newDb.airmen = normalizeAirmenSeniority(Array.from(map.values()));
+          const default155 = isDefault155UasuOffice();
+          newDb.airmen = normalizeAirmenSeniority(
+            Array.from(map.values()).map((a) => enrichAirmanWithInitialBaseline(a, default155))
+          );
         }
       }
 
@@ -1620,20 +1692,22 @@ export class LocalDatabaseEngine {
           Object.values(newDb.assignments || {}).forEach((list) => {
             (list || []).forEach((a) => {
               if (!isCorruptedAssignmentRecord(a)) {
-                byId.set(getAssignmentDocId(a), a);
+                const normA = { ...a, airmanId: normalizeCanonicalAirmanId(a.airmanId) };
+                byId.set(getAssignmentDocId(normA), normA);
               }
             });
           });
           incAsn.forEach((ca: any) => {
-            const docId = getAssignmentDocId(ca);
+            const normCa = { ...ca, airmanId: normalizeCanonicalAirmanId(ca.airmanId) };
+            const docId = getAssignmentDocId(normCa);
             if (pendingQueue.assignments[docId]) return;
-            if (ca.isDeleted || isCorruptedAssignmentRecord(ca)) {
+            if (normCa.isDeleted || isCorruptedAssignmentRecord(normCa)) {
               if (byId.has(docId)) {
                 byId.delete(docId);
                 dbChanged = true;
               }
             } else {
-              const clean = { ...ca };
+              const clean = { ...normCa };
               delete clean.isDeleted;
               byId.set(docId, clean);
               dbChanged = true;
@@ -2235,15 +2309,11 @@ export class LocalDatabaseEngine {
 
             const defaultInactiveIds = new Set(INITIAL_AIRMEN.filter(a => a.active === false).map(a => a.id));
             const syncedAirmen = (migratedAirmen || []).map((a: any) => {
-              const initA = isDefault155
-                ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === a.bdNo) || (i.id && i.id === a.id))
-                : undefined;
-              const isActive = isDefault155 && defaultInactiveIds.has(a.id) ? false : (a.active !== false);
+              const enriched = enrichAirmanWithInitialBaseline(a, isDefault155);
+              const isActive = isDefault155 && defaultInactiveIds.has(enriched.id) ? false : (enriched.active !== false);
               return {
-                ...a,
-                fullName: (a.fullName && a.fullName !== a.name) ? a.fullName : (initA?.fullName || a.fullName || a.name),
-                flightName: a.flightName || a.flight || a.Flight || initA?.flightName || 'Admin',
-                email: a.email || a.gmail || undefined,
+                ...enriched,
+                email: enriched.email || enriched.gmail || undefined,
                 active: isActive,
               };
             });
@@ -2263,7 +2333,7 @@ export class LocalDatabaseEngine {
               }
             });
 
-            // DEDUPLICATE ASSIGNMENTS & FILTER CORRUPTED RECORDS
+            // DEDUPLICATE ASSIGNMENTS, NORMALIZE airmanId TO BD/<digits>, & FILTER CORRUPTED RECORDS
             let hadCorruptedAssignments = false;
             Object.keys(migratedAssignments).forEach((m) => {
               const list = migratedAssignments[m] || [];
@@ -2273,6 +2343,11 @@ export class LocalDatabaseEngine {
                 if (isCorruptedAssignmentRecord(asn)) {
                   hadCorruptedAssignments = true;
                   return;
+                }
+                const normAirId = normalizeCanonicalAirmanId(asn.airmanId);
+                if (normAirId && normAirId !== asn.airmanId) {
+                  asn.airmanId = normAirId;
+                  hadCorruptedAssignments = true;
                 }
                 const airDigits = String(asn.airmanId || '').replace(/\D/g, '');
                 const shift = asn.idaShift || asn.shift || 'n';
@@ -2704,9 +2779,12 @@ export class LocalDatabaseEngine {
   private isSameAirmanId(idA?: string, idB?: string): boolean {
     if (!idA || !idB) return false;
     if (idA === idB) return true;
+    const normA = normalizeCanonicalAirmanId(idA);
+    const normB = normalizeCanonicalAirmanId(idB);
+    if (normA && normB && normA === normB) return true;
     if (idA.replace(/\//g, '_') === idB.replace(/\//g, '_')) return true;
-    const dA = String(idA).replace(/\D/g, '');
-    const dB = String(idB).replace(/\D/g, '');
+    const dA = String(normA).replace(/\D/g, '');
+    const dB = String(normB).replace(/\D/g, '');
     return Boolean(dA && dB && dA === dB);
   }
 
@@ -2719,9 +2797,18 @@ export class LocalDatabaseEngine {
 
     const isDep = (code: any) => code && ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(code);
     if (assignment.dutyCode === 'IDAC' || assignment.dutyCode === 'IDA') {
-      index = list.findIndex(
-        (a) => this.isSameAirmanId(a.airmanId, assignment.airmanId) && a.date === assignment.date && (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA')
-      );
+      if (assignment.idaShift === 'Night') {
+        index = list.findIndex(
+          (a) => this.isSameAirmanId(a.airmanId, assignment.airmanId) && a.date === assignment.date && (
+            ((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && a.idaShift === 'Night') ||
+            a.dutyCode === 'ON_PARADE'
+          )
+        );
+      } else {
+        index = list.findIndex(
+          (a) => this.isSameAirmanId(a.airmanId, assignment.airmanId) && a.date === assignment.date && !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && a.idaShift === 'Night') && isDep(a.dutyCode) === isDep(assignment.dutyCode)
+        );
+      }
     } else {
       index = list.findIndex(
         (a) => this.isSameAirmanId(a.airmanId, assignment.airmanId) && a.date === assignment.date && !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && a.idaShift === 'Night') && isDep(a.dutyCode) === isDep(assignment.dutyCode)
@@ -3217,13 +3304,19 @@ export class LocalDatabaseEngine {
       if (!rawId) return [];
       const keys = new Set<string>();
       keys.add(rawId);
+      const norm = normalizeCanonicalAirmanId(rawId);
+      if (norm) keys.add(norm);
       if (rawId.includes('/')) keys.add(rawId.replace(/\//g, '_'));
       if (rawId.includes('_')) keys.add(rawId.replace(/_/g, '/'));
-      const digits = String(rawId).replace(/\D/g, '');
+      const digits = String(norm || rawId).replace(/\D/g, '');
       if (digits) {
         keys.add(`BD_${digits}`);
         keys.add(`BD/${digits}`);
         keys.add(digits);
+        const initA = INITIAL_AIRMEN.find((i) => String(i.bdNo || '').replace(/\D/g, '') === digits);
+        if (initA && initA.serNo) {
+          keys.add(`airman-${initA.serNo}`);
+        }
       }
       return Array.from(keys);
     };
@@ -3297,16 +3390,27 @@ export class LocalDatabaseEngine {
             return; // Keep the specific duty
           }
 
-          // 2. For PT or Night Count, IDAC Night is top priority duty
+          // 2. For PT or Night Count, IDAC Night is top priority duty;
+          //    For Morning Parade (!isPT && !isNightCount), an active daytime duty/disposal or DUTY_OFF takes priority over IDAC Night
           const isIdacNt = (asn: DutyAssignment) =>
             (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(asn.dutyCode)) &&
             (asn.idaShift === 'Night' || (asn.notes || '').toLowerCase().includes('night') || (asn.notes || '').toLowerCase().includes('nt'));
-          if ((isPT || isNightCount) && isIdacNt(a) && !isIdacNt(existing)) {
-            putIntoAssignmentMap(assignmentMap, a);
-            return;
-          }
-          if ((isPT || isNightCount) && !isIdacNt(a) && isIdacNt(existing)) {
-            return;
+          if (isPT || isNightCount) {
+            if (isIdacNt(a) && !isIdacNt(existing)) {
+              putIntoAssignmentMap(assignmentMap, a);
+              return;
+            }
+            if (!isIdacNt(a) && isIdacNt(existing)) {
+              return;
+            }
+          } else {
+            if (!isIdacNt(a) && isIdacNt(existing)) {
+              putIntoAssignmentMap(assignmentMap, a);
+              return;
+            }
+            if (isIdacNt(a) && !isIdacNt(existing)) {
+              return;
+            }
           }
 
           // 3. Regular duty overwrites deployment
@@ -3467,7 +3571,19 @@ export class LocalDatabaseEngine {
       const ass = findInAssignmentMap(assignmentMap, airmanId);
       const isDep = ass && ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(ass.dutyCode);
       const isBaseToday = isBaseOrEmptyDuty(ass);
-      if (!ass || isDep || isBaseToday) {
+      const isTodayIdacNt = Boolean(
+        ass &&
+        ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(String(ass.dutyCode || '').toUpperCase().trim()) &&
+        (
+          String(ass.idaShift || '').toLowerCase().includes('night') ||
+          String(ass.idaShift || '').toLowerCase().includes('nt') ||
+          String(ass.idaShift || '').toLowerCase() === 'c' ||
+          String(ass.notes || '').toLowerCase().includes('night') ||
+          String(ass.notes || '').toLowerCase().includes('nt')
+        )
+      );
+      const isMorningParadeOnTodayDuty = Boolean(!isPT && !isNightCount && ass && (isTodayIdacNt || getDutyRule(ass).onParadeOnDutyDay));
+      if (!ass || isDep || isBaseToday || isMorningParadeOnTodayDuty) {
         const yestAss = findInAssignmentMap(yestMap, airmanId);
         if (yestAss) {
           const yestRule = getDutyRule(yestAss);

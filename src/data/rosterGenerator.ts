@@ -1,22 +1,33 @@
 import { Airman, DutyAssignment, DutyCategoryCode, ConflictAlert, AirmanDutyStats } from '../types';
 import { DUTY_TYPE_MAP } from './dutyTypes';
+import { INITIAL_AIRMEN } from './initialAirmen';
 import { generateOfficialMonthAssignments } from './officialJulyAugustData';
 
-
+const SER_TO_DIGITS = new Map<string, string>();
+const DIGITS_TO_SER = new Map<string, number>();
+INITIAL_AIRMEN.forEach((a) => {
+  const d = String(a.bdNo || a.id || '').replace(/\D/g, '');
+  if (a.serNo && d) {
+    SER_TO_DIGITS.set(`airman-${a.serNo}`, d);
+    DIGITS_TO_SER.set(d, a.serNo);
+  }
+});
 
 export function addAssignmentToMap(assignmentMap: Map<string, DutyAssignment>, ass: DutyAssignment) {
   const scope = ass.disposalScope || 'ALL';
   if (scope !== 'ALL') return; // We only build the map for the main roster
   
   const rawId = ass.airmanId || '';
-  const digits = String(rawId).replace(/\D/g, '');
+  const digits = SER_TO_DIGITS.get(rawId.toLowerCase()) || String(rawId).replace(/\D/g, '');
+  const serNo = digits ? DIGITS_TO_SER.get(digits) : undefined;
   const keys = [
     `${rawId}_${ass.date}`,
     rawId.includes('/') ? `${rawId.replace(/\//g, '_')}_${ass.date}` : '',
     rawId.includes('_') ? `${rawId.replace(/_/g, '/')}_${ass.date}` : '',
     digits ? `BD_${digits}_${ass.date}` : '',
     digits ? `BD/${digits}_${ass.date}` : '',
-    digits ? `${digits}_${ass.date}` : ''
+    digits ? `${digits}_${ass.date}` : '',
+    serNo ? `airman-${serNo}_${ass.date}` : '',
   ].filter(Boolean);
   
   keys.forEach((key) => {
@@ -151,7 +162,10 @@ export function calculateDutyStats(
 ): AirmanDutyStats[] {
   const uniqueAss = new Map();
   rawAssignments.forEach(a => {
-      const key = a.airmanId + '-' + a.date + '-' + a.dutyCode + '-' + (a.idaShift || '');
+      const rawId = String(a.airmanId || '');
+      const digits = SER_TO_DIGITS.get(rawId.toLowerCase()) || rawId.replace(/\D/g, '');
+      const normKeyId = digits.length >= 4 ? `BD/${digits}` : rawId;
+      const key = normKeyId + '-' + a.date + '-' + a.dutyCode + '-' + (a.idaShift || '');
       if (!uniqueAss.has(key)) uniqueAss.set(key, a);
   });
   const assignments = Array.from(uniqueAss.values());
@@ -183,9 +197,10 @@ export function calculateDutyStats(
     };
     statsList.push(statObj);
     map.set(a.id, statObj);
+    if (a.serNo) map.set(`airman-${a.serNo}`, statObj);
     if (a.id.includes('_')) map.set(a.id.replace(/_/g, '/'), statObj);
     if (a.id.includes('/')) map.set(a.id.replace(/\//g, '_'), statObj);
-    const digits = a.bdNo || a.id.replace(/\D/g, '');
+    const digits = String(a.bdNo || a.id || '').replace(/\D/g, '');
     if (digits) {
       map.set(`BD_${digits}`, statObj);
       map.set(`BD/${digits}`, statObj);
@@ -329,17 +344,29 @@ export function calculateDutyStats(
 
 export function detectConflicts(airmen: Airman[], assignments: DutyAssignment[]): ConflictAlert[] {
   const alerts: ConflictAlert[] = [];
-  const airmanMap = new Map(airmen.map((a) => [a.id, a]));
+  const airmanMap = new Map<string, Airman>();
+  airmen.forEach((a) => {
+    airmanMap.set(a.id, a);
+    if (a.serNo) airmanMap.set(`airman-${a.serNo}`, a);
+    const digits = String(a.bdNo || a.id || '').replace(/\D/g, '');
+    if (digits) {
+      airmanMap.set(digits, a);
+      airmanMap.set(`BD/${digits}`, a);
+      airmanMap.set(`BD_${digits}`, a);
+    }
+  });
 
   // Only consider main roster (ALL) scope for conflicts
   const mainAssignments = assignments.filter((a) => (a.disposalScope || 'ALL') === 'ALL');
 
-  // Group assignments by airman
+  // Group assignments by canonical airman id
   const byAirman = new Map<string, DutyAssignment[]>();
   mainAssignments.forEach((ass) => {
-    const list = byAirman.get(ass.airmanId) || [];
+    const resolvedAir = airmanMap.get(ass.airmanId);
+    const canonicalId = resolvedAir ? resolvedAir.id : ass.airmanId;
+    const list = byAirman.get(canonicalId) || [];
     list.push(ass);
-    byAirman.set(ass.airmanId, list);
+    byAirman.set(canonicalId, list);
   });
 
   byAirman.forEach((list, airmanId) => {

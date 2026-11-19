@@ -5,6 +5,7 @@ import { X, Shield, Phone, MapPin, Award, Calendar, FileText, User, Filter, Prin
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
 import { isDefault155UasuOffice } from '../firebase';
+import { matchAirmanId } from '../utils/airmanDisposalHelper';
 
 const resolveImageUrl = (url?: string | null): string => {
   if (!url || typeof url !== 'string') return '';
@@ -515,7 +516,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
         const results = await Promise.all(promises);
         const all: DutyAssignment[] = results.flat();
         let airmanAss = all.filter(
-          (a) => a && a.airmanId === airman.id && a.date >= fromDate && a.date <= toDate
+          (a) => a && matchAirmanId(a.airmanId, airman.id) && a.date >= fromDate && a.date <= toDate
         );
         airmanAss.sort((a, b) => a.date.localeCompare(b.date));
 

@@ -4,6 +4,7 @@ import { ActivityHistoryItem, Airman, DutyCategoryCode, IDAShift } from '../type
 import { getCurrentUserSession } from '../utils/authSession';
 import { DUTY_TYPES } from '../data/dutyTypes';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
+import { matchAirmanId } from '../utils/airmanDisposalHelper';
 import {
   History,
   X,
@@ -73,7 +74,7 @@ export const EntryHistoryModal: React.FC<EntryHistoryModalProps> = ({
 
   const handleDelete = (item: ActivityHistoryItem) => {
     if (isAdmin && adminFlight && item.airmanId) {
-      const target = airmen.find(a => a.id === item.airmanId);
+      const target = airmen.find(a => matchAirmanId(a.id, item.airmanId));
       if (target && target.flightName !== adminFlight) {
         alert("You cannot delete entries for personnel outside your flight.");
         return;
@@ -118,7 +119,7 @@ export const EntryHistoryModal: React.FC<EntryHistoryModalProps> = ({
 
   const startEditing = (item: ActivityHistoryItem) => {
     if (isAdmin && adminFlight && item.airmanId) {
-      const target = airmen.find(a => a.id === item.airmanId);
+      const target = airmen.find(a => matchAirmanId(a.id, item.airmanId));
       if (target && target.flightName !== adminFlight) {
         alert("You cannot edit entries for personnel outside your flight.");
         return;
@@ -188,7 +189,7 @@ export const EntryHistoryModal: React.FC<EntryHistoryModalProps> = ({
 
       const result = await res.json();
       if (res.ok && result.success) {
-        const targetAirman = airmen.find((a) => a.id === (editAirmanId || oldAirmanId));
+        const targetAirman = airmen.find((a) => matchAirmanId(a.id, editAirmanId || oldAirmanId));
         setSuccessMsg(`Updated entry for ${targetAirman ? `${targetAirman.rank} ${targetAirman.name}` : editingItem.airmanName}`);
         setEditingItem(null);
         // Optimistically remove old entry from local state
@@ -236,7 +237,7 @@ export const EntryHistoryModal: React.FC<EntryHistoryModalProps> = ({
     // Check missing airman
     const rawName = item.airmanName || (item as any).title || '';
     const air = airmen.find((a) => 
-      (item.airmanId && a.id === item.airmanId) ||
+      (item.airmanId && matchAirmanId(a.id, item.airmanId)) ||
       (a.bdNo && rawName.includes(String(a.bdNo))) ||
       (a.name && rawName.toLowerCase().includes(a.name.toLowerCase()))
     );
@@ -488,7 +489,7 @@ export const EntryHistoryModal: React.FC<EntryHistoryModalProps> = ({
 
               const rawName = item.airmanName || (item as any).title || '';
               const air = airmen.find((a) => 
-                (item.airmanId && a.id === item.airmanId) ||
+                (item.airmanId && matchAirmanId(a.id, item.airmanId)) ||
                 (a.bdNo && rawName.includes(String(a.bdNo))) ||
                 (a.name && rawName.toLowerCase().includes(a.name.toLowerCase()))
               );

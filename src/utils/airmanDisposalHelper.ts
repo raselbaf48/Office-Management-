@@ -1,5 +1,6 @@
 import { DutyAssignment } from '../types';
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
+import { INITIAL_AIRMEN } from '../data/initialAirmen';
 import { localDb } from '../services/localDatabase';
 
 export interface AirmanDisposalStatus {
@@ -12,19 +13,58 @@ export interface AirmanDisposalStatus {
   primaryDutyCode?: string;
 }
 
+const LEGACY_SER_TO_CANONICAL_ID = new Map<string, string>();
+INITIAL_AIRMEN.forEach((a) => {
+  if (a.serNo) {
+    LEGACY_SER_TO_CANONICAL_ID.set(`airman-${a.serNo}`, a.id);
+  }
+  const digits = String(a.bdNo || a.id || '').replace(/\D/g, '');
+  if (digits) {
+    LEGACY_SER_TO_CANONICAL_ID.set(digits, a.id);
+    LEGACY_SER_TO_CANONICAL_ID.set(`bd/${digits}`, a.id);
+    LEGACY_SER_TO_CANONICAL_ID.set(`bd_${digits}`, a.id);
+    LEGACY_SER_TO_CANONICAL_ID.set(`airman-${digits}`, a.id);
+  }
+});
+
+/**
+ * Normalizes any airmanId ("BD_474455", "airman-35", "474455", "BD/474455")
+ * into the canonical "BD/<digits>" format whenever possible.
+ */
+export function normalizeCanonicalAirmanId(rawId?: string): string {
+  if (!rawId) return '';
+  const trimmed = String(rawId).trim();
+  const lower = trimmed.toLowerCase();
+  if (LEGACY_SER_TO_CANONICAL_ID.has(lower)) {
+    return LEGACY_SER_TO_CANONICAL_ID.get(lower)!;
+  }
+  const bdMatch = trimmed.match(/^BD[_\/](\d+)$/i);
+  if (bdMatch) {
+    return `BD/${bdMatch[1]}`;
+  }
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length >= 4) {
+    return `BD/${digits}`;
+  }
+  return trimmed;
+}
+
 /**
  * Robust airman ID matching that handles:
- * - "BD/99066" vs "99066" vs "airman-99066"
+ * - "BD/99066" vs "BD_99066" vs "99066" vs "airman-99066" vs "airman-1".."airman-48"
  * - Numeric clean matches or lowercase string matches
  */
 export function matchAirmanId(idA?: string, idB?: string): boolean {
   if (!idA || !idB) return false;
   if (idA === idB) return true;
-  const cleanA = String(idA).replace(/^BD\//i, '').replace(/^airman-/i, '').replace(/\D/g, '').trim();
-  const cleanB = String(idB).replace(/^BD\//i, '').replace(/^airman-/i, '').replace(/\D/g, '').trim();
+  const normA = normalizeCanonicalAirmanId(idA);
+  const normB = normalizeCanonicalAirmanId(idB);
+  if (normA && normB && normA === normB) return true;
+  const cleanA = String(normA).replace(/^BD[\/_]/i, '').replace(/^airman-/i, '').replace(/\D/g, '').trim();
+  const cleanB = String(normB).replace(/^BD[\/_]/i, '').replace(/^airman-/i, '').replace(/\D/g, '').trim();
   if (cleanA.length > 0 && cleanB.length > 0 && cleanA === cleanB) return true;
-  const strA = String(idA).replace(/^BD\//i, '').replace(/^airman-/i, '').trim().toLowerCase();
-  const strB = String(idB).replace(/^BD\//i, '').replace(/^airman-/i, '').trim().toLowerCase();
+  const strA = String(normA).replace(/^BD[\/_]/i, '').replace(/^airman-/i, '').trim().toLowerCase();
+  const strB = String(normB).replace(/^BD[\/_]/i, '').replace(/^airman-/i, '').trim().toLowerCase();
   return strA === strB;
 }
 

@@ -482,7 +482,7 @@ export const DashboardParadeState: React.FC<DashboardParadeStateProps> = ({
                         const items = (data?.personnelStatusList || []).filter((p) => {
                           const cat = strengthCategoryModal.category;
                           if (cat === 'TOTAL') return true;
-                          if (cat === 'PARADE') return p.dutyCode === 'ON_PARADE' || ((p.dutyCode === 'IDAC' || p.dutyCode === 'IDA') && p.idaShift === 'Night');
+                          if (cat === 'PARADE') return (p.statusCategory === 'PARADE' || p.dutyCode === 'ON_PARADE' || ((p.dutyCode === 'IDAC' || p.dutyCode === 'IDA') && p.idaShift === 'Night')) && p.statusCategory !== 'OFF';
                           if (cat === 'DUTY') return ['GD', 'BTF', 'NTF', 'HALISHAHAR', 'AIRPORT'].includes(p.dutyCode) || ((p.dutyCode === 'IDAC' || p.dutyCode === 'IDA') && p.idaShift !== 'Night');
                           if (cat === 'DUTY_OFF') return p.dutyCode === 'DUTY_OFF' || p.statusCategory === 'OFF';
                           if (cat === 'LEAVE') return p.statusCategory === 'LEAVE';
@@ -531,7 +531,7 @@ export const DashboardParadeState: React.FC<DashboardParadeStateProps> = ({
                   .filter((p) => {
                     const cat = strengthCategoryModal.category;
                     if (cat === 'TOTAL') return true;
-                    if (cat === 'PARADE') return p.dutyCode === 'ON_PARADE' || ((p.dutyCode === 'IDAC' || p.dutyCode === 'IDA') && p.idaShift === 'Night');
+                    if (cat === 'PARADE') return (p.statusCategory === 'PARADE' || p.dutyCode === 'ON_PARADE' || ((p.dutyCode === 'IDAC' || p.dutyCode === 'IDA') && p.idaShift === 'Night')) && p.statusCategory !== 'OFF';
                     if (cat === 'DUTY') return ['GD', 'BTF', 'NTF', 'HALISHAHAR', 'AIRPORT'].includes(p.dutyCode) || ((p.dutyCode === 'IDAC' || p.dutyCode === 'IDA') && p.idaShift !== 'Night');
                     if (cat === 'DUTY_OFF') return p.statusCategory === 'OFF' || p.dutyCode === 'DUTY_OFF';
                     if (cat === 'LEAVE') return p.statusCategory === 'LEAVE';

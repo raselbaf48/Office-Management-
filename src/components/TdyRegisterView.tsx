@@ -7,7 +7,7 @@ import { sortAirmenBySeniority } from '../utils/seniority';
 import { exportTableToCSV } from '../utils/csvExport';
 import { getOptimalMinColumnWidth } from '../utils/tableUtils';
 import { EntryHistoryModal } from './EntryHistoryModal';
-import { getAirmanDisposalForRange } from '../utils/airmanDisposalHelper';
+import { getAirmanDisposalForRange, matchAirmanId } from '../utils/airmanDisposalHelper';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
 import { getAvailableTrades } from '../utils/tradeList';
@@ -152,7 +152,7 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
       Object.keys(recordMap).forEach((airmanId) => {
         const rec = recordMap[airmanId];
         const airmanTdyAssignments = allAssignments
-          .filter((ass: any) => ass && (ass.dutyCode === 'TDY' || ass.dutyCode === 'ATT' || ass.dutyCode === 'DETT') && ass.airmanId === airmanId && ass.date)
+          .filter((ass: any) => ass && (ass.dutyCode === 'TDY' || ass.dutyCode === 'ATT' || ass.dutyCode === 'DETT') && matchAirmanId(ass.airmanId, airmanId) && ass.date)
           .sort((a: any, b: any) => a.date.localeCompare(b.date));
 
         

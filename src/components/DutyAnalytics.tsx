@@ -5,6 +5,7 @@ import { DUTY_TYPES, DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { BarChart3, ShieldCheck, AlertCircle, Award, Scale, Layers, RefreshCw, Calendar, X, ChevronLeft, ChevronRight, Printer } from 'lucide-react';
 import { calculateDutyStats, getDaysInMonth } from '../data/rosterGenerator';
 import { getActiveOfficeIdentity } from '../firebase';
+import { matchAirmanId, normalizeCanonicalAirmanId } from '../utils/airmanDisposalHelper';
 
 interface DutyAnalyticsProps {
   airmen: Airman[];
@@ -711,9 +712,10 @@ const DutyDetailsModal: React.FC<{
   
   const uniqueRelevantAssignmentsMap = new Map();
   rawRelevantAssignments.forEach(a => {
-      const key = a.airmanId + '-' + a.date + '-' + a.dutyCode + '-' + (a.idaShift || '');
+      const normId = normalizeCanonicalAirmanId(a.airmanId);
+      const key = normId + '-' + a.date + '-' + a.dutyCode + '-' + (a.idaShift || '');
       if (!uniqueRelevantAssignmentsMap.has(key)) {
-          uniqueRelevantAssignmentsMap.set(key, a);
+          uniqueRelevantAssignmentsMap.set(key, { ...a, airmanId: normId });
       }
   });
   const relevantAssignments = Array.from(uniqueRelevantAssignmentsMap.values());
@@ -725,11 +727,11 @@ const DutyDetailsModal: React.FC<{
     .filter(a => {
       if (!a.active) return false;
       if (modalFlight && a.flightName !== modalFlight) return false;
-      return uniqueAirmanIds.includes(a.id);
+      return uniqueAirmanIds.some(uid => matchAirmanId(uid, a.id));
     })
     .sort((a, b) => {
       const getUniqueCount = (id: string) => {
-        return relevantAssignments.filter(x => x.airmanId === id).length;
+        return relevantAssignments.filter(x => matchAirmanId(x.airmanId, id)).length;
       };
       const aCount = getUniqueCount(a.id);
       const bCount = getUniqueCount(b.id);
@@ -774,13 +776,13 @@ const DutyDetailsModal: React.FC<{
             </td>
             <td className="px-3 py-2 border-b border-r border-slate-200 dark:border-slate-700 text-center">
               <span className="inline-flex items-center justify-center min-w-[28px] h-7 bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400 font-black rounded-lg text-[13px]">
-                {relevantAssignments.filter(a => a.airmanId === airman.id).length}
+                {relevantAssignments.filter(a => matchAirmanId(a.airmanId, airman.id)).length}
               </span>
             </td>
             {daysArray.map(day => {
               const dateStr = `${currentYear}-${currentMonth.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
               const assignmentsOnDateRaw = relevantAssignments
-                .filter(a => a.airmanId === airman.id && a.date === dateStr);
+                .filter(a => matchAirmanId(a.airmanId, airman.id) && a.date === dateStr);
                 
               const uniqueMap = new Map();
               assignmentsOnDateRaw.forEach(a => {

@@ -2,6 +2,7 @@ import { DateNavigator } from './DateNavigator';
 import { createPortal } from 'react-dom';
 import React, { useState, useEffect, useMemo } from 'react';
 import { Airman, DutyAssignment, UserRole, FlightName } from '../types';
+import { INITIAL_AIRMEN } from '../data/initialAirmen';
 import { getFlightDutyQuotaForDate } from '../data/officialDutyRatioMatrix';
 import {
  exportDutyRosterDocx,
@@ -27,7 +28,8 @@ import {
  PenTool,
 } from 'lucide-react';
 import { Logo155UASU } from './Logo155UASU';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
+import { getAvailableTrades } from '../utils/tradeList';
 import {
   IdacSignatureModal,
   IdacSignatureDetails,
@@ -98,6 +100,11 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  const [loading, setLoading] = useState<boolean>(false);
  const [assignments, setAssignments] = useState<DutyAssignment[]>([]);
  const [isExportingDocx, setIsExportingDocx] = useState<boolean>(false);
+ const officeHasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
+ const tradesList = useMemo(() => ['All', ...getAvailableTrades(airmen.map((a) => a.trade || ''))], [airmen]);
+ const flightsList: (FlightName | 'All')[] = ['All', 'Avionics', 'Mechanics', 'GCS', 'Admin'];
+ const [flightFilter, setFlightFilter] = useState<FlightName | 'All'>('All');
+ const [tradeFilter, setTradeFilter] = useState<string>('All');
 
  // Dedicated IDAC Duty Signature state (completely independent of Parade State)
  const [showIdacSignatureModal, setShowIdacSignatureModal] = useState<boolean>(false);
@@ -283,6 +290,34 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  return ranges.join(', ');
  };
 
+ const airmanMap = useMemo(() => {
+   const map = new Map<string, Airman>();
+   airmen.forEach((a) => {
+     map.set(a.id, a);
+     if (a.serNo) {
+       map.set(`airman-${a.serNo}`, a);
+     }
+     if (a.bdNo) {
+       const d = String(a.bdNo).replace(/\D/g, '');
+       map.set(a.bdNo, a);
+       map.set(`BD/${a.bdNo}`, a);
+       map.set(`BD_${a.bdNo}`, a);
+       if (d) {
+         map.set(d, a);
+         map.set(`BD/${d}`, a);
+         map.set(`BD_${d}`, a);
+       }
+     }
+     const rawDigits = String(a.id).replace(/\D/g, '');
+     if (rawDigits) {
+       map.set(rawDigits, a);
+       map.set(`BD/${rawDigits}`, a);
+       map.set(`BD_${rawDigits}`, a);
+     }
+   });
+   return map;
+ }, [airmen]);
+
  // Build Option 1: Base Duty (Up to Najirpara Taskforce / NTF)
  // Sections:
  // 1. SY DUTY (Cpl & Below) (GD)
@@ -296,10 +331,17 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  assignmentsByDate.set(dStr, dayAss);
  });
 
- // Extract all unique airmen involved
- const involvedAirmenIds = new Set<string>();
+ // Extract all unique airmen involved (by canonical airman.id), filtered by Flight or Trade
+ const involvedAirmenMap = new Map<string, Airman>();
  assignmentsByDate.forEach(assList => {
- assList.forEach(a => involvedAirmenIds.add(a.airmanId));
+ assList.forEach(a => {
+   const resolved = airmanMap.get(a.airmanId);
+   if (resolved) {
+     if (officeHasFlights && flightFilter !== 'All' && resolved.flightName !== flightFilter) return;
+     if (!officeHasFlights && tradeFilter !== 'All' && resolved.trade !== tradeFilter) return;
+     involvedAirmenMap.set(resolved.id, resolved);
+   }
+ });
  });
 
  // Create blocks of consecutive duties for each airman
@@ -311,14 +353,11 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  }
  const allBlocks: DutyBlock[] = [];
 
- involvedAirmenIds.forEach(airmanId => {
- const airman = airmen.find(a => a.id === airmanId);
- if (!airman) return;
-
+ involvedAirmenMap.forEach((airman) => {
  // get dates this airman has duty, sorted chronologically
  const airmanDates = activeDates.filter(dStr => {
  const dayAss = assignmentsByDate.get(dStr);
- return dayAss && dayAss.some(a => a.airmanId === airmanId);
+ return dayAss && dayAss.some(a => airmanMap.get(a.airmanId)?.id === airman.id);
  });
 
  if (airmanDates.length === 0) return;
@@ -345,7 +384,9 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
 
  // Sort all blocks primarily by start date, then by rank seniority
  allBlocks.sort((a, b) => {
- return a.startDate.localeCompare(b.startDate);
+ const dateCmp = a.startDate.localeCompare(b.startDate);
+ if (dateCmp !== 0) return dateCmp;
+ return (a.airman.serNo || 999) - (b.airman.serNo || 999);
  });
 
  const output: RosterExportItem[] = [];
@@ -361,14 +402,20 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  dateRangeStr = `${startDay}-${endDay}`;
  }
 
+ const initBaseline = INITIAL_AIRMEN.find(
+   (i) => i.id === block.airman.id || i.bdNo === block.airman.bdNo
+ );
+ const rawBlock = block.airman.addressBlock || initBaseline?.addressBlock;
+ const rawMobile = block.airman.mobileNo || initBaseline?.mobileNo;
+
  output.push({
  serNo: String(serCounter).padStart(2, '0'),
- bdNo: block.airman.bdNo.replace('BD/', ''),
+ bdNo: (block.airman.bdNo || '').replace('BD/', ''),
  rank: formatRank(block.airman.rank),
  name: block.airman.name,
  trade: block.airman.trade,
- block: formatBlockName(block.airman.addressBlock),
- mobileNo: block.airman.mobileNo || '-',
+ block: formatBlockName(rawBlock),
+ mobileNo: rawMobile || '-',
  dateStr: dateRangeStr,
  section: getActiveOfficeIdentity().officeName,
  });
@@ -381,6 +428,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  const syDutyItems = buildSectionItems((code) => code === 'GD');
  const baseTaskforceItems = buildSectionItems((code) => code === 'BTF');
  const nazirparaItems = buildSectionItems((code) => code === 'NTF');
+ const halishaharItems = buildSectionItems((code) => code === 'HALISHAHAR');
 
  const baseDutiesSections: RosterSectionData[] = [
  {
@@ -396,6 +444,10 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  title: 'NAZIRPARA TASKFORCE',
  items: nazirparaItems,
  },
+ {
+ title: 'HALISHAHAR DUTY',
+ items: halishaharItems,
+ },
  ];
 
  // Format shift cell with proxy flight tag and flight placeholder fallback
@@ -405,14 +457,18 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  shiftAssignments: DutyAssignment[],
  airMap: Map<string, Airman>
  ): string => {
- const flightOrder: FlightName[] = ['Avionics', 'Mechanics', 'GCS', 'Admin'];
+ const flightOrder: FlightName[] = (officeHasFlights && flightFilter !== 'All')
+   ? [flightFilter]
+   : ['Avionics', 'Mechanics', 'GCS', 'Admin'];
  const requiredFlightSlots: FlightName[] = [];
- flightOrder.forEach((fl) => {
- const count = getFlightDutyQuotaForDate(dateStr, fl, 'IDAC', shift);
- for (let i = 0; i < count; i++) {
- requiredFlightSlots.push(fl);
+ if (!(!officeHasFlights && tradeFilter !== 'All')) {
+   flightOrder.forEach((fl) => {
+     const count = getFlightDutyQuotaForDate(dateStr, fl, 'IDAC', shift);
+     for (let i = 0; i < count; i++) {
+       requiredFlightSlots.push(fl);
+     }
+   });
  }
- });
 
  const getFlightShort = (fl: string) => {
  if (!fl) return '';
@@ -440,8 +496,17 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  uniqueShiftAssignments.forEach((a) => {
  const air = airMap.get(a.airmanId);
  if (!air) {
+ if (officeHasFlights && flightFilter !== 'All') return;
+ if (!officeHasFlights && tradeFilter !== 'All') return;
  assignedParts.push(a.notes || 'Duty Airman');
  return;
+ }
+
+ if (officeHasFlights && flightFilter !== 'All' && air.flightName !== flightFilter && a.proxyForFlight !== flightFilter) {
+   return;
+ }
+ if (!officeHasFlights && tradeFilter !== 'All' && air.trade !== tradeFilter) {
+   return;
  }
 
  const proxyFlight = a.proxyForFlight;
@@ -480,30 +545,6 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
 
  // Build Option 2: IDAC Center Duty Table Rows (Matching Attached BAF Format)
  // Format: Date | Day | Morning (0730F - 1430F) | Afternoon (1430F - 2100F) | Night (2100F - 0730F)
- const airmanMap = useMemo(() => {
-   const map = new Map<string, Airman>();
-   airmen.forEach((a) => {
-     map.set(a.id, a);
-     if (a.bdNo) {
-       const d = String(a.bdNo).replace(/\D/g, '');
-       map.set(a.bdNo, a);
-       map.set(`BD/${a.bdNo}`, a);
-       map.set(`BD_${a.bdNo}`, a);
-       if (d) {
-         map.set(d, a);
-         map.set(`BD/${d}`, a);
-         map.set(`BD_${d}`, a);
-       }
-     }
-     const rawDigits = String(a.id).replace(/\D/g, '');
-     if (rawDigits) {
-       map.set(rawDigits, a);
-       map.set(`BD/${rawDigits}`, a);
-       map.set(`BD_${rawDigits}`, a);
-     }
-   });
-   return map;
- }, [airmen]);
 
  const idacRosterRows: IdacRosterRow[] = activeDates.map((dateStr) => {
  const [y, m, d] = dateStr.split('-').map(Number);
@@ -719,8 +760,9 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  </div>
  </div>
 
- {/* 2 OPTIONS / TABS SWITCHER */}
- <div className="flex items-center space-x-3 border-b border-slate-200 dark:border-slate-800 dark:border-slate-700 pb-3">
+ {/* 2 OPTIONS / TABS SWITCHER + FLIGHT / TRADE FILTER */}
+ <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 dark:border-slate-700 pb-3">
+ <div className="flex items-center space-x-3">
  <button
  onClick={() => setRosterMode('BASE_DUTIES')}
  className={`flex items-center space-x-2 px-4 py-2.5 rounded-xl font-black text-xs transition-all shadow-xs ${
@@ -744,6 +786,52 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  <Clock className="w-4 h-4" />
  <span>IDAC Duty</span>
  </button>
+ </div>
+
+ {/* Flight Filter (when office has flights) OR Trade Filter (when office has no flights) */}
+ {officeHasFlights ? (
+   <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl border border-slate-200 dark:border-slate-700">
+     <span className="text-[11px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400 px-2 flex items-center gap-1">
+       <ListFilter className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+       <span>Flight:</span>
+     </span>
+     {flightsList.map((flt) => (
+       <button
+         key={flt}
+         type="button"
+         onClick={() => setFlightFilter(flt)}
+         className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+           flightFilter === flt
+             ? 'bg-emerald-600 text-white shadow-xs font-black'
+             : 'text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700'
+         }`}
+       >
+         {flt === 'All' ? 'All Flights' : flt}
+       </button>
+     ))}
+   </div>
+ ) : (
+   <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl border border-slate-200 dark:border-slate-700">
+     <span className="text-[11px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400 px-2 flex items-center gap-1">
+       <ListFilter className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+       <span>Trade:</span>
+     </span>
+     {tradesList.map((tr) => (
+       <button
+         key={tr}
+         type="button"
+         onClick={() => setTradeFilter(tr)}
+         className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+           tradeFilter === tr
+             ? 'bg-emerald-600 text-white shadow-xs font-black'
+             : 'text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700'
+         }`}
+       >
+         {tr === 'All' ? 'All Trades' : tr}
+       </button>
+     ))}
+   </div>
+ )}
  </div>
 
  

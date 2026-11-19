@@ -1,4 +1,5 @@
 import { DutyAssignment } from '../types';
+import { INITIAL_AIRMEN } from './initialAirmen';
 
 interface DayRaw {
   day: number;
@@ -748,58 +749,64 @@ const AUGUST_RAW_DATA: DayRaw[] = [
   },
 ];
 
-// Mapping helper from name / alias to airmanId
+// Mapping helper from name / alias to canonical airmanId (BD/<bdNo>)
 export function getAirmanIdByName(name: string): string | null {
   const n = name.toLowerCase().trim();
 
-  if (n.includes('moshiur')) return 'airman-1';
-  if (n.includes('mostafa')) return 'airman-2';
-  if (n.includes('jahid')) return 'airman-3';
-  if (n.includes('mojaffar') || n.includes('mgfr')) return 'airman-4';
-  if (n.includes('baten') || n.includes('btn')) return 'airman-5';
-  if (n.includes('shahin')) return 'airman-6';
-  if (n.includes('lutfar') || n.includes('lfr')) return 'airman-7';
-  if (n.includes('aminul') || n.includes('amn')) return 'airman-8';
-  if (n.includes('uzzal') || n.includes('uzl')) return 'airman-9';
-  if (n.includes('riaz') || n.includes('riz')) return 'airman-10';
-  if (n.includes('mobarak') || n.includes('mbk')) return 'airman-11';
-  if (n.includes('rubel') || n.includes('rbl')) return 'airman-12';
-  if (n.includes('absar') || n.includes('abs')) return 'airman-13';
-  if (n.includes('mahid')) return 'airman-14';
-  if (n.includes('asad') || n.includes('asd')) return 'airman-15';
-  if (n.includes('fokrul') || n.includes('fkl')) return 'airman-16';
-  if (n.includes('shishir') || n.includes('ssr')) return 'airman-17';
-  if (n.includes('mustakim') || n.includes('mkm')) return 'airman-18';
-  if (n.includes('sojib') || n.includes('sjb') && n.includes('sgt')) return 'airman-19';
-  if (n.includes('sgt mehedi')) return 'airman-20';
-  if (n.includes('ripon') || n.includes('rpn')) return 'airman-21';
-  if (n.includes('gafur') || n.includes('gfr')) return 'airman-22';
-  if (n.includes('shohel') || n.includes('shl')) return 'airman-23';
-  if (n.includes('imran') || n.includes('imr')) return 'airman-24';
-  if (n.includes('nahid')) return 'airman-25';
-  if (n.includes('harun') || n.includes('hrn')) return 'airman-26';
-  if (n.includes('omar') || n.includes('omr')) return 'airman-27';
-  if (n.includes('ismail') || n.includes('ism')) return 'airman-28';
-  if (n.includes('ahsan') || n.includes('ahs')) return 'airman-29';
-  if (n.includes('koraishi') || n.includes('kors')) return 'airman-30';
-  if (n.includes('cpl sajib') || n.includes('sajib')) return 'airman-31';
-  if (n.includes('maraz') || n.includes('mrz')) return 'airman-32';
-  if (n.includes('shariful') || n.includes('sfl')) return 'airman-33';
-  if (n.includes('akash') || n.includes('aks')) return 'airman-34';
-  if (n.includes('rasel') || n.includes('rsl')) return 'airman-35';
-  if (n.includes('mahedi') && !n.includes('gs') && !n.includes('sgt')) return 'airman-36'; // LAC Mahedi Mech
-  if (n.includes('rakib') || n.includes('rkb')) return 'airman-37';
-  if (n.includes('joy')) return 'airman-38';
-  if (n.includes('ashraful') || n.includes('asf')) return 'airman-39';
-  if (n.includes('hridoy') || n.includes('hrd')) return 'airman-40';
-  if (n.includes('mehedi (gs)') || (n.includes('mehedi') && n.includes('gcs'))) return 'airman-41'; // LAC Mehedi GCS
-  if (n.includes('nishad') || n.includes('nsh')) return 'airman-42';
-  if (n.includes('zakirul') || n.includes('zkr')) return 'airman-43';
-  if (n.includes('zubayer') || n.includes('zby') || n.includes('zbr')) return 'airman-44';
-  if (n.includes('tusar') || n.includes('tsr') || n.includes('thn')) return 'airman-45';
-  if (n.includes('adnan') || n.includes('adn')) return 'airman-46';
-  if (n.includes('rashed') || n.includes('rsd')) return 'airman-47';
-  if (n.includes('saidul') || n.includes('sdl')) return 'airman-48';
+  let serNo: number | null = null;
+  if (n.includes('moshiur')) serNo = 1;
+  else if (n.includes('mostafa')) serNo = 2;
+  else if (n.includes('jahid')) serNo = 3;
+  else if (n.includes('mojaffar') || n.includes('mgfr')) serNo = 4;
+  else if (n.includes('baten') || n.includes('btn')) serNo = 5;
+  else if (n.includes('shahin')) serNo = 6;
+  else if (n.includes('lutfar') || n.includes('lfr')) serNo = 7;
+  else if (n.includes('aminul') || n.includes('amn')) serNo = 8;
+  else if (n.includes('uzzal') || n.includes('uzl')) serNo = 9;
+  else if (n.includes('riaz') || n.includes('riz')) serNo = 10;
+  else if (n.includes('mobarak') || n.includes('mbk')) serNo = 11;
+  else if (n.includes('rubel') || n.includes('rbl')) serNo = 12;
+  else if (n.includes('absar') || n.includes('abs')) serNo = 13;
+  else if (n.includes('mahid')) serNo = 14;
+  else if (n.includes('asad') || n.includes('asd')) serNo = 15;
+  else if (n.includes('fokrul') || n.includes('fkl')) serNo = 16;
+  else if (n.includes('shishir') || n.includes('ssr')) serNo = 17;
+  else if (n.includes('mustakim') || n.includes('mkm')) serNo = 18;
+  else if (n.includes('sojib') || (n.includes('sjb') && n.includes('sgt'))) serNo = 19;
+  else if (n.includes('sgt mehedi')) serNo = 20;
+  else if (n.includes('ripon') || n.includes('rpn')) serNo = 21;
+  else if (n.includes('gafur') || n.includes('gfr')) serNo = 22;
+  else if (n.includes('shohel') || n.includes('shl')) serNo = 23;
+  else if (n.includes('imran') || n.includes('imr')) serNo = 24;
+  else if (n.includes('nahid')) serNo = 25;
+  else if (n.includes('harun') || n.includes('hrn')) serNo = 26;
+  else if (n.includes('omar') || n.includes('omr')) serNo = 27;
+  else if (n.includes('ismail') || n.includes('ism')) serNo = 28;
+  else if (n.includes('ahsan') || n.includes('ahs')) serNo = 29;
+  else if (n.includes('koraishi') || n.includes('kors')) serNo = 30;
+  else if (n.includes('cpl sajib') || n.includes('sajib')) serNo = 31;
+  else if (n.includes('maraz') || n.includes('mrz')) serNo = 32;
+  else if (n.includes('shariful') || n.includes('sfl')) serNo = 33;
+  else if (n.includes('akash') || n.includes('aks')) serNo = 34;
+  else if (n.includes('rasel') || n.includes('rsl')) serNo = 35;
+  else if (n.includes('mahedi') && !n.includes('gs') && !n.includes('sgt')) serNo = 36; // LAC Mahedi Mech
+  else if (n.includes('rakib') || n.includes('rkb')) serNo = 37;
+  else if (n.includes('joy')) serNo = 38;
+  else if (n.includes('ashraful') || n.includes('asf')) serNo = 39;
+  else if (n.includes('hridoy') || n.includes('hrd')) serNo = 40;
+  else if (n.includes('mehedi (gs)') || (n.includes('mehedi') && n.includes('gcs'))) serNo = 41; // LAC Mehedi GCS
+  else if (n.includes('nishad') || n.includes('nsh')) serNo = 42;
+  else if (n.includes('zakirul') || n.includes('zkr')) serNo = 43;
+  else if (n.includes('zubayer') || n.includes('zby') || n.includes('zbr')) serNo = 44;
+  else if (n.includes('tusar') || n.includes('tsr') || n.includes('thn')) serNo = 45;
+  else if (n.includes('adnan') || n.includes('adn')) serNo = 46;
+  else if (n.includes('rashed') || n.includes('rsd')) serNo = 47;
+  else if (n.includes('saidul') || n.includes('sdl')) serNo = 48;
+
+  if (serNo !== null) {
+    const matched = INITIAL_AIRMEN.find((a) => a.serNo === serNo);
+    return matched ? matched.id : `airman-${serNo}`;
+  }
 
   return null;
 }
