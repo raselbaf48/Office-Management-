@@ -209,12 +209,15 @@ export function syncBrowserTabIdentity(
       const existingIcons = document.head.querySelectorAll<HTMLLinkElement>(iconSelectors);
       if (existingIcons.length > 0) {
         existingIcons.forEach((linkEl) => {
-          linkEl.href = DEFAULT_APP_LOGO;
+          linkEl.href =
+            linkEl.sizes?.value === '512x512'
+              ? '/pwa-pc-512x512.png?v=17'
+              : '/pwa-pc-192x192.png?v=17';
         });
       } else {
         const newIcon = document.createElement('link');
         newIcon.rel = 'icon';
-        newIcon.href = DEFAULT_APP_LOGO;
+        newIcon.href = '/pwa-pc-192x192.png?v=17';
         document.head.appendChild(newIcon);
       }
       return;
@@ -240,16 +243,24 @@ export function syncBrowserTabIdentity(
         ? `${cleanName} | ${DEFAULT_APP_TITLE}`
         : DEFAULT_APP_TITLE;
 
+    const is155Logo = cleanLogo.includes('155-uasu-baf-logo');
     const iconSelectors = 'link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]';
     const existingIcons = document.head.querySelectorAll<HTMLLinkElement>(iconSelectors);
     if (existingIcons.length > 0) {
       existingIcons.forEach((linkEl) => {
-        linkEl.href = cleanLogo;
+        if (is155Logo) {
+          linkEl.href =
+            linkEl.sizes?.value === '512x512'
+              ? '/pwa-512x512-trans.png?v=17'
+              : '/pwa-192x192-trans.png?v=17';
+        } else {
+          linkEl.href = cleanLogo;
+        }
       });
     } else {
       const newIcon = document.createElement('link');
       newIcon.rel = 'icon';
-      newIcon.href = cleanLogo;
+      newIcon.href = is155Logo ? '/pwa-192x192-trans.png?v=17' : cleanLogo;
       document.head.appendChild(newIcon);
     }
 

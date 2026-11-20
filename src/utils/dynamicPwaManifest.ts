@@ -8,7 +8,10 @@ export interface DynamicPWAOfficeIdentity {
 
 const DEFAULT_APP_NAME = 'Office Management Application';
 const DEFAULT_SHORT_NAME = 'Office Mgmt';
-const DEFAULT_LOGO_PATH = '/office-management-logo.png?v=15';
+const DEFAULT_192_ICON = '/pwa-pc-192x192.png?v=17';
+const DEFAULT_512_ICON = '/pwa-pc-512x512.png?v=17';
+const UASU_192_ICON = '/pwa-192x192-trans.png?v=17';
+const UASU_512_ICON = '/pwa-512x512-trans.png?v=17';
 
 let lastSyncedSignature = '';
 const iconResizeCache = new Map<string, { icon192: string; icon512: string; maskable512: string; hash: string }>();
@@ -24,7 +27,7 @@ function computeSimpleHash(str: string): string {
 }
 
 function resolveAbsoluteUrl(src: string): string {
-  if (!src) return `${window.location.origin}${DEFAULT_LOGO_PATH}`;
+  if (!src) return `${window.location.origin}${DEFAULT_192_ICON}`;
   if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://') || src.startsWith('blob:')) {
     return src;
   }
@@ -32,9 +35,8 @@ function resolveAbsoluteUrl(src: string): string {
 }
 
 /**
- * Renders any office logo (URL or Base64, even non-square images like 1846x2304)
- * onto exact 192x192 and 512x512 square canvases so Chromium/Windows/Android
- * never rejects the icon for non-square dimensions and falls back to a letter badge ("1").
+ * Renders any custom office logo (URL or Base64) onto exact 192x192 and 512x512
+ * square canvases so Chromium/Windows/Android never rejects the icon for non-matching dimensions.
  */
 async function generateSizedPwaIcons(
   logoSrc: string
@@ -113,9 +115,8 @@ function buildShortName(officeName: string, isGeneric: boolean): string {
 
 /**
  * Dynamically updates `<link rel="manifest">`, `<link rel="apple-touch-icon">`,
- * `<meta name="apple-mobile-web-app-title">`, and uploads exact 192x192 & 512x512
- * square PNG buffers to `/api/pwa-icon-upload` so Windows/Android/iOS always gets
- * the real office logo instead of a fallback letter/number icon.
+ * `<meta name="apple-mobile-web-app-title">`, and ensures exact 192x192 & 512x512
+ * square PNG endpoints are served so Windows/Android/iOS always displays the real office logo.
  */
 export async function syncDynamicOfficePwaManifest(
   identity: DynamicPWAOfficeIdentity
@@ -134,9 +135,15 @@ export async function syncDynamicOfficePwaManifest(
     const shortName = buildShortName(appName, isGeneric);
     const rawLogo =
       String(identity.officeLogo || '').trim() ||
-      (isGeneric ? DEFAULT_LOGO_PATH : '/155-uasu-baf-logo.png');
+      (isGeneric ? DEFAULT_192_ICON : '/155-uasu-baf-logo.png');
     const officeCode = String(identity.officeCode || '').trim();
     const slogan = String(identity.officeSlogan || '').trim();
+
+    const is155DefaultLogo =
+      !isGeneric &&
+      (rawLogo.includes('155-uasu-baf-logo') ||
+        rawLogo.includes('pwa-192x192-trans') ||
+        rawLogo.includes('pwa-512x512-trans'));
 
     const sig = `${appName}__${rawLogo.slice(0, 120)}__${officeCode}__${slogan}`;
     if (sig === lastSyncedSignature) return;
@@ -163,39 +170,44 @@ export async function syncDynamicOfficePwaManifest(
     }
     appNameMeta.content = appName;
 
-    // 2. Generate exact square PNG icons (192x192, 512x512, maskable 512x512) via Canvas
-    const sizedIcons = await generateSizedPwaIcons(rawLogo);
+    let serverIcon192Url = isGeneric ? DEFAULT_192_ICON : UASU_192_ICON;
+    let serverIcon512Url = isGeneric ? DEFAULT_512_ICON : UASU_512_ICON;
+    let customIconHash = '';
 
-    // 3. Upload exact square 192x192 & 512x512 PNGs to server so Chromium can fetch real HTTP PNG endpoints
-    if (
-      sizedIcons.icon192.startsWith('data:image/png') &&
-      !uploadedHashes.has(sizedIcons.hash)
-    ) {
-      try {
-        const res = await fetch('/api/pwa-icon-upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            hash: sizedIcons.hash,
-            icon192: sizedIcons.icon192,
-            icon512: sizedIcons.icon512,
-            maskable512: sizedIcons.maskable512,
-          }),
-        });
-        if (res.ok) {
-          uploadedHashes.add(sizedIcons.hash);
-        }
-      } catch {}
+    // 2. For custom uploaded office logos (not 155 default or generic default), generate exact 192x192 & 512x512 PNGs via Canvas
+    if (!isGeneric && !is155DefaultLogo) {
+      const sizedIcons = await generateSizedPwaIcons(rawLogo);
+      customIconHash = sizedIcons.hash;
+      if (
+        sizedIcons.icon192.startsWith('data:image/png') &&
+        !uploadedHashes.has(sizedIcons.hash)
+      ) {
+        try {
+          const res = await fetch('/api/pwa-icon-upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              hash: sizedIcons.hash,
+              icon192: sizedIcons.icon192,
+              icon512: sizedIcons.icon512,
+              maskable512: sizedIcons.maskable512,
+            }),
+          });
+          if (res.ok) {
+            uploadedHashes.add(sizedIcons.hash);
+          }
+        } catch {}
+      }
+      if (uploadedHashes.has(sizedIcons.hash)) {
+        serverIcon192Url = `/api/pwa-icon/${encodeURIComponent(sizedIcons.hash)}/icon-192.png`;
+        serverIcon512Url = `/api/pwa-icon/${encodeURIComponent(sizedIcons.hash)}/icon-512.png`;
+      } else {
+        serverIcon192Url = sizedIcons.icon192;
+        serverIcon512Url = sizedIcons.icon512;
+      }
     }
 
-    const serverIcon192Url = uploadedHashes.has(sizedIcons.hash)
-      ? `/api/pwa-icon/${encodeURIComponent(sizedIcons.hash)}/icon-192.png`
-      : sizedIcons.icon192;
-    const serverIcon512Url = uploadedHashes.has(sizedIcons.hash)
-      ? `/api/pwa-icon/${encodeURIComponent(sizedIcons.hash)}/icon-512.png`
-      : sizedIcons.icon512;
-
-    // 4. Update apple-touch-icon and link[rel="icon"] elements to exact square PNGs
+    // 3. Update apple-touch-icon and link[rel="icon"] elements to exact 192x192 & 512x512 square PNGs
     const appleTouchIcons = document.head.querySelectorAll<HTMLLinkElement>(
       'link[rel="apple-touch-icon"]'
     );
@@ -206,7 +218,7 @@ export async function syncDynamicOfficePwaManifest(
     } else {
       const appleIcon = document.createElement('link');
       appleIcon.rel = 'apple-touch-icon';
-      appleIcon.sizes = '180x180';
+      appleIcon.sizes = '192x192';
       appleIcon.href = serverIcon192Url;
       document.head.appendChild(appleIcon);
     }
@@ -222,7 +234,7 @@ export async function syncDynamicOfficePwaManifest(
       }
     });
 
-    // 5. Point <link rel="manifest"> to the server-backed manifest referencing the exact square PNG endpoints
+    // 4. Point <link rel="manifest"> to the server-backed manifest referencing the exact 192x192 & 512x512 PNG endpoints
     let manifestLink = document.head.querySelector<HTMLLinkElement>('link[rel="manifest"]');
     if (!manifestLink) {
       manifestLink = document.createElement('link');
@@ -233,12 +245,11 @@ export async function syncDynamicOfficePwaManifest(
     const params = new URLSearchParams();
     params.set('name', appName);
     params.set('logo', rawLogo.startsWith('data:') ? '' : rawLogo);
-    if (uploadedHashes.has(sizedIcons.hash)) {
-      params.set('iconHash', sizedIcons.hash);
+    if (customIconHash && uploadedHashes.has(customIconHash)) {
+      params.set('iconHash', customIconHash);
     }
     if (officeCode) params.set('code', officeCode);
     if (slogan) params.set('slogan', slogan);
-    params.set('_t', String(Date.now()));
     manifestLink.href = `/api/pwa-manifest?${params.toString()}`;
 
     window.dispatchEvent(

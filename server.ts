@@ -566,16 +566,20 @@ async function startServer() {
         res.setHeader('Cache-Control', 'public, max-age=86400');
         return res.status(200).send(buf);
       }
-      // Fallback to static 192/512 PNG if server restarted before client re-uploaded
-      const fallbackFile = file.includes('192') ? 'pwa-192x192.png' : 'pwa-512x512.png';
+      // Fallback to exact 192x192 / 512x512 PNG if server restarted before client re-uploaded
+      const fallbackFile = file.includes('192')
+        ? 'pwa-192x192-trans.png'
+        : file.includes('maskable')
+          ? 'pwa-512x512-full.png'
+          : 'pwa-512x512-trans.png';
       const fallbackPath = path.join(process.cwd(), 'public', fallbackFile);
       if (fs.existsSync(fallbackPath)) {
         res.setHeader('Content-Type', 'image/png');
         return res.sendFile(fallbackPath);
       }
-      return res.redirect('/pwa-512x512.png');
+      return res.redirect('/pwa-512x512-trans.png');
     } catch {
-      return res.redirect('/pwa-512x512.png');
+      return res.redirect('/pwa-512x512-trans.png');
     }
   });
 
@@ -594,6 +598,12 @@ async function startServer() {
         rawName === 'Office Management Application' ||
         rawName === 'Office Management System';
 
+      const is155Office =
+        !isGeneric &&
+        (rawName.toUpperCase().includes('155') ||
+          rawCode.toUpperCase().includes('155') ||
+          rawLogo.includes('155-uasu-baf-logo'));
+
       const appName = isGeneric ? 'Office Management Application' : rawName;
       const shortName = isGeneric
         ? 'Office Mgmt'
@@ -607,22 +617,22 @@ async function startServer() {
 
       const hasPreparedIcons = Boolean(iconHash && dynamicPwaIconStore.has(iconHash));
 
-      let icon192Url = '/pwa-192x192.png?v=16';
-      let icon512Url = '/pwa-512x512.png?v=16';
-      let maskable512Url = '/pwa-mobile-maskable-512x512.png?v=16';
+      // Default to exact 192x192 & 512x512 PNGs (never 2048x2048 or 1846x2304)
+      let icon192Url = isGeneric ? '/pwa-pc-192x192.png?v=17' : '/pwa-192x192-trans.png?v=17';
+      let icon512Url = isGeneric ? '/pwa-pc-512x512.png?v=17' : '/pwa-512x512-trans.png?v=17';
+      let maskable192Url = isGeneric ? '/pwa-pc-192x192.png?v=17' : '/pwa-192x192-full.png?v=17';
+      let maskable512Url = isGeneric ? '/pwa-pc-512x512.png?v=17' : '/pwa-512x512-full.png?v=17';
 
-      if (hasPreparedIcons) {
+      if (!is155Office && !isGeneric && hasPreparedIcons) {
         icon192Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-192.png`;
         icon512Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-512.png`;
+        maskable192Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-192.png`;
         maskable512Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/maskable-512.png`;
-      } else if (
-        rawLogo &&
-        !rawLogo.includes('155-uasu-baf-logo.png') &&
-        (rawLogo.startsWith('/') || rawLogo.startsWith('http://') || rawLogo.startsWith('https://'))
-      ) {
-        icon192Url = rawLogo;
-        icon512Url = rawLogo;
-        maskable512Url = rawLogo;
+      } else if (hasPreparedIcons && !is155Office) {
+        icon192Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-192.png`;
+        icon512Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-512.png`;
+        maskable192Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-192.png`;
+        maskable512Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/maskable-512.png`;
       }
 
       const officeQuery = rawCode ? `?office=${encodeURIComponent(rawCode)}` : '';
@@ -650,6 +660,12 @@ async function startServer() {
             sizes: '512x512',
             type: 'image/png',
             purpose: 'any',
+          },
+          {
+            src: maskable192Url,
+            sizes: '192x192',
+            type: 'image/png',
+            purpose: 'maskable',
           },
           {
             src: maskable512Url,
