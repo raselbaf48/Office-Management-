@@ -526,6 +526,59 @@ async function startServer() {
     res.status(200).json({ success: true, message: 'Handled via local store' });
   });
 
+  // In-memory store for dynamically resized square PWA PNG icons (192x192, 512x512, maskable 512x512)
+  const dynamicPwaIconStore = new Map<string, { icon192: Buffer; icon512: Buffer; maskable512: Buffer }>();
+
+  app.post('/api/pwa-icon-upload', express.json({ limit: '15mb' }), (req, res) => {
+    try {
+      const { hash, icon192, icon512, maskable512 } = req.body || {};
+      if (!hash || !icon192 || !icon512) {
+        return res.status(400).json({ error: 'Missing hash or icon buffers' });
+      }
+      const stripDataPrefix = (dataUrl: string) =>
+        Buffer.from(String(dataUrl).replace(/^data:image\/\w+;base64,/, ''), 'base64');
+
+      const buf192 = stripDataPrefix(icon192);
+      const buf512 = stripDataPrefix(icon512);
+      const bufMask = maskable512 ? stripDataPrefix(maskable512) : buf512;
+
+      dynamicPwaIconStore.set(String(hash), {
+        icon192: buf192,
+        icon512: buf512,
+        maskable512: bufMask,
+      });
+
+      res.json({ success: true, hash });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to store PWA icons' });
+    }
+  });
+
+  app.get('/api/pwa-icon/:hash/:file', (req, res) => {
+    try {
+      const { hash, file } = req.params;
+      const entry = dynamicPwaIconStore.get(hash);
+      if (entry) {
+        let buf = entry.icon512;
+        if (file.includes('192')) buf = entry.icon192;
+        else if (file.includes('maskable')) buf = entry.maskable512;
+        res.setHeader('Content-Type', 'image/png');
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        return res.status(200).send(buf);
+      }
+      // Fallback to static 192/512 PNG if server restarted before client re-uploaded
+      const fallbackFile = file.includes('192') ? 'pwa-192x192.png' : 'pwa-512x512.png';
+      const fallbackPath = path.join(process.cwd(), 'public', fallbackFile);
+      if (fs.existsSync(fallbackPath)) {
+        res.setHeader('Content-Type', 'image/png');
+        return res.sendFile(fallbackPath);
+      }
+      return res.redirect('/pwa-512x512.png');
+    } catch {
+      return res.redirect('/pwa-512x512.png');
+    }
+  });
+
   // Dynamic Office-Specific PWA Manifest Endpoint
   app.get('/api/pwa-manifest', (req, res) => {
     try {
@@ -533,6 +586,7 @@ async function startServer() {
       const rawLogo = String(req.query.logo || '').trim();
       const rawCode = String(req.query.code || '').trim();
       const rawSlogan = String(req.query.slogan || '').trim();
+      const iconHash = String(req.query.iconHash || '').trim();
 
       const isGeneric =
         !rawName ||
@@ -551,13 +605,25 @@ async function startServer() {
         ? `${appName} — ${rawSlogan}`
         : `Official PWA for ${appName} duty register, parade state, and personnel management.`;
 
-      // Resolve absolute or root-relative icon URL
-      const iconUrl =
-        rawLogo && (rawLogo.startsWith('/') || rawLogo.startsWith('http://') || rawLogo.startsWith('https://'))
-          ? rawLogo
-          : isGeneric
-            ? '/office-management-logo.png?v=15'
-            : '/155-uasu-baf-logo.png';
+      const hasPreparedIcons = Boolean(iconHash && dynamicPwaIconStore.has(iconHash));
+
+      let icon192Url = '/pwa-192x192.png?v=16';
+      let icon512Url = '/pwa-512x512.png?v=16';
+      let maskable512Url = '/pwa-mobile-maskable-512x512.png?v=16';
+
+      if (hasPreparedIcons) {
+        icon192Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-192.png`;
+        icon512Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-512.png`;
+        maskable512Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/maskable-512.png`;
+      } else if (
+        rawLogo &&
+        !rawLogo.includes('155-uasu-baf-logo.png') &&
+        (rawLogo.startsWith('/') || rawLogo.startsWith('http://') || rawLogo.startsWith('https://'))
+      ) {
+        icon192Url = rawLogo;
+        icon512Url = rawLogo;
+        maskable512Url = rawLogo;
+      }
 
       const officeQuery = rawCode ? `?office=${encodeURIComponent(rawCode)}` : '';
 
@@ -574,25 +640,19 @@ async function startServer() {
         orientation: 'any',
         icons: [
           {
-            src: iconUrl,
+            src: icon192Url,
             sizes: '192x192',
             type: 'image/png',
             purpose: 'any',
           },
           {
-            src: iconUrl,
+            src: icon512Url,
             sizes: '512x512',
             type: 'image/png',
             purpose: 'any',
           },
           {
-            src: iconUrl,
-            sizes: '192x192',
-            type: 'image/png',
-            purpose: 'maskable',
-          },
-          {
-            src: iconUrl,
+            src: maskable512Url,
             sizes: '512x512',
             type: 'image/png',
             purpose: 'maskable',
