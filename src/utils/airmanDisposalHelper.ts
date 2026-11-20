@@ -69,6 +69,32 @@ export function matchAirmanId(idA?: string, idB?: string): boolean {
 }
 
 /**
+ * Checks whether an airman is currently active in the unit on a given date (or overall).
+ * Excludes airmen with active === false, status/leaveReason indicating Posted Out / Retired / Dismissed,
+ * or dateLeft <= targetDate.
+ */
+export function isAirmanActiveOnDate(airman: any, targetDate?: string): boolean {
+  if (!airman) return false;
+  if (airman.active === false) return false;
+  const reasonOrStatus = String(airman.leaveReason || airman.status || '').toLowerCase().trim();
+  if (
+    ['posted out', 'retired', 'dismissed', 'inactive', 'suspended', 'disabled'].includes(reasonOrStatus) &&
+    (airman.active === false || Boolean(airman.dateLeft) || reasonOrStatus === 'posted out')
+  ) {
+    return false;
+  }
+  if (airman.dateLeft) {
+    if (!targetDate || airman.dateLeft <= targetDate) {
+      return false;
+    }
+  }
+  if (targetDate && airman.dateJoined && airman.dateJoined > targetDate) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Returns an array of YYYY-MM-DD date strings between start and end date (inclusive)
  */
 export function getDatesInRange(startDate: string, endDate: string): string[] {

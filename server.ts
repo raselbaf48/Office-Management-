@@ -526,6 +526,88 @@ async function startServer() {
     res.status(200).json({ success: true, message: 'Handled via local store' });
   });
 
+  // Dynamic Office-Specific PWA Manifest Endpoint
+  app.get('/api/pwa-manifest', (req, res) => {
+    try {
+      const rawName = String(req.query.name || '').trim();
+      const rawLogo = String(req.query.logo || '').trim();
+      const rawCode = String(req.query.code || '').trim();
+      const rawSlogan = String(req.query.slogan || '').trim();
+
+      const isGeneric =
+        !rawName ||
+        rawName === 'Office Management' ||
+        rawName === 'Office Management Application' ||
+        rawName === 'Office Management System';
+
+      const appName = isGeneric ? 'Office Management Application' : rawName;
+      const shortName = isGeneric
+        ? 'Office Mgmt'
+        : rawName.length <= 12
+          ? rawName
+          : rawName.slice(0, 12).trim();
+
+      const description = rawSlogan
+        ? `${appName} — ${rawSlogan}`
+        : `Official PWA for ${appName} duty register, parade state, and personnel management.`;
+
+      // Resolve absolute or root-relative icon URL
+      const iconUrl =
+        rawLogo && (rawLogo.startsWith('/') || rawLogo.startsWith('http://') || rawLogo.startsWith('https://'))
+          ? rawLogo
+          : isGeneric
+            ? '/office-management-logo.png?v=15'
+            : '/155-uasu-baf-logo.png';
+
+      const officeQuery = rawCode ? `?office=${encodeURIComponent(rawCode)}` : '';
+
+      const manifestPayload = {
+        id: `/${officeQuery}`,
+        name: appName,
+        short_name: shortName,
+        description,
+        start_url: `/${officeQuery}`,
+        scope: '/',
+        display: 'standalone',
+        background_color: '#020617',
+        theme_color: '#020617',
+        orientation: 'any',
+        icons: [
+          {
+            src: iconUrl,
+            sizes: '192x192',
+            type: 'image/png',
+            purpose: 'any',
+          },
+          {
+            src: iconUrl,
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'any',
+          },
+          {
+            src: iconUrl,
+            sizes: '192x192',
+            type: 'image/png',
+            purpose: 'maskable',
+          },
+          {
+            src: iconUrl,
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'maskable',
+          },
+        ],
+      };
+
+      res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.status(200).send(JSON.stringify(manifestPayload, null, 2));
+    } catch (err) {
+      res.redirect('/manifest.json');
+    }
+  });
+
   // Dedicated Office App Unit Data Endpoints
   app.get('/api/airmen', (req, res) => {
     const db = loadDatabase();

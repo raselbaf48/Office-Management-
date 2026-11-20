@@ -23,6 +23,7 @@ import {
 } from 'firebase/firestore/lite';
 import firebaseConfigData from '../firebase-applet-config.json';
 import { getRawLocalStorageItem, setRawLocalStorageItem } from './utils/safeStorage';
+import { syncDynamicOfficePwaManifest } from './utils/dynamicPwaManifest';
 
 // ============================================================================
 // 1. MASTER OWNER CONFIGURATION & CONSTANTS
@@ -251,6 +252,14 @@ export function syncBrowserTabIdentity(
       newIcon.href = cleanLogo;
       document.head.appendChild(newIcon);
     }
+
+    syncDynamicOfficePwaManifest({
+      officeName: cleanName,
+      officeLogo: cleanLogo,
+      officeCode: identity.officeCode,
+      officeSlogan: identity.officeSlogan,
+      officeBase: identity.officeBase,
+    });
   } catch {}
 }
 

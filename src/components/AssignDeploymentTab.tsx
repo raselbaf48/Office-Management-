@@ -53,8 +53,19 @@ export const AssignDeploymentTab: React.FC<AssignDeploymentTabProps> = ({
   }, [isAdmin, adminFlight]);
 
   const deploymentAirmenList = useMemo(() => {
-    return sortAirmenBySeniority(airmen.filter((a) => a.flightName === deploymentFlight));
-  }, [airmen, deploymentFlight]);
+    return sortAirmenBySeniority(
+      airmen.filter(
+        (a) =>
+          a.flightName === deploymentFlight &&
+          a.active !== false &&
+          !['posted out', 'retired', 'dismissed', 'inactive'].includes(
+            String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
+          ) &&
+          (!a.dateLeft || a.dateLeft > deploymentFromDate) &&
+          (!a.dateJoined || a.dateJoined <= deploymentFromDate)
+      )
+    );
+  }, [airmen, deploymentFlight, deploymentFromDate]);
 
   const [assignmentsMap, setAssignmentsMap] = useState<Record<string, DutyAssignment[]>>(() => {
     return localDb.getDb()?.assignments || {};

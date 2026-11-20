@@ -55,8 +55,19 @@ export const AssignTdyTab: React.FC<AssignTdyTabProps> = ({
   }, [isAdmin, adminFlight]);
 
   const tdyAirmenList = useMemo(() => {
-    return sortAirmenBySeniority(airmen.filter((a) => a.flightName === tdyFlight));
-  }, [airmen, tdyFlight]);
+    return sortAirmenBySeniority(
+      airmen.filter(
+        (a) =>
+          a.flightName === tdyFlight &&
+          a.active !== false &&
+          !['posted out', 'retired', 'dismissed', 'inactive'].includes(
+            String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
+          ) &&
+          (!a.dateLeft || a.dateLeft > tdyFromDate) &&
+          (!a.dateJoined || a.dateJoined <= tdyFromDate)
+      )
+    );
+  }, [airmen, tdyFlight, tdyFromDate]);
 
   const [assignmentsMap, setAssignmentsMap] = useState<Record<string, DutyAssignment[]>>(() => {
     return localDb.getDb()?.assignments || {};

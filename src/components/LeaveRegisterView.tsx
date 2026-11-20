@@ -195,11 +195,20 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
 
   // Filter airmen for Grant Leave Modal
   const grantAirmenList = useMemo(() => {
+    const activeOnly = airmen.filter(
+      (a) =>
+        a.active !== false &&
+        !['posted out', 'retired', 'dismissed', 'inactive'].includes(
+          String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
+        ) &&
+        (!a.dateLeft || a.dateLeft > leaveFromDate) &&
+        (!a.dateJoined || a.dateJoined <= leaveFromDate)
+    );
     const list = officeHasFlights
-      ? airmen.filter((a) => a.flightName === grantLeaveFlight)
-      : airmen.filter((a) => (grantLeaveTrade === 'All' ? true : a.trade === grantLeaveTrade));
+      ? activeOnly.filter((a) => a.flightName === grantLeaveFlight)
+      : activeOnly.filter((a) => (grantLeaveTrade === 'All' ? true : a.trade === grantLeaveTrade));
     return sortAirmenBySeniority(list);
-  }, [airmen, officeHasFlights, grantLeaveFlight, grantLeaveTrade]);
+  }, [airmen, officeHasFlights, grantLeaveFlight, grantLeaveTrade, leaveFromDate]);
 
   // Reset airman selection when flight changes if the selected airman is not in the new flight
   useEffect(() => {

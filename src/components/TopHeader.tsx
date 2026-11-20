@@ -7,6 +7,7 @@ import { UserSession } from '../utils/authSession';
 import { isFirebaseConfigured, isFirestoreQuotaExceeded, getActiveOfficeIdentity } from '../firebase';
 import { getFirebaseSyncState } from '../services/localDatabase';
 import { getPendingDeltaCount } from '../services/firebaseFirestoreService';
+import { PWAInstallButton } from './PWAInstallButton';
 
 const CloudSyncButton = () => {
   const [syncState, setSyncState] = useState(() => getFirebaseSyncState());
@@ -202,6 +203,11 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
 
         {/* Upper Right: User Profile & Admin Option */}
         <div className="flex items-center space-x-2.5">
+          <PWAInstallButton
+            variant="header"
+            officeName={officeIdentity.officeName}
+            officeLogo={officeIdentity.officeLogo}
+          />
           <CloudSyncButton />
           {/* User Session Info Badge */}
           {userSession && (

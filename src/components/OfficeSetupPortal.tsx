@@ -479,41 +479,8 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
       <div className="fixed bottom-10 right-10 w-80 h-80 bg-sky-500/10 rounded-full blur-3xl pointer-events-none z-0" />
 
       <div className="w-full max-w-[440px] relative z-10">
-        {/* Theme Selector */}
-        <div className="flex items-center justify-between mb-3">
-          <div
-            className="inline-flex items-center gap-1 p-1 rounded-xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200 dark:border-slate-800 shadow-sm"
-            role="group"
-            aria-label="Global Theme Selector"
-          >
-            {(
-              [
-                { id: 'light', label: 'Light', icon: Sun },
-                { id: 'dark', label: 'Dark', icon: Moon },
-                { id: 'system', label: 'Auto', icon: Monitor },
-              ] as const
-            ).map((opt) => {
-              const Icon = opt.icon;
-              const isSelected = themePreference === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => setThemePreference(opt.id)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
-                    isSelected
-                      ? 'bg-emerald-600 text-white shadow-sm'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <Icon className="w-3.5 h-3.5" />
-                  <span>{opt.label}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          {onCancel && (
+        {onCancel && (
+          <div className="flex items-center justify-end mb-3">
             <button
               type="button"
               onClick={onCancel}
@@ -521,8 +488,8 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
             >
               Back to Login
             </button>
-          )}
-        </div>
+          </div>
+        )}
 
         <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-2xl space-y-5 text-slate-900 dark:text-white">
           {/* Header */}

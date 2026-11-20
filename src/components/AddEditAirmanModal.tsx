@@ -114,9 +114,16 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
   // L/In specific state
   const [blockNo, setBlockNo] = useState<string>(() => {
     if (airmanToEdit?.addressBlock) {
-      const match = airmanToEdit.addressBlock.match(/Block\s*(?:No[:\s]*)?([^,]+)/i);
-      if (match) return match[1].trim();
-      return airmanToEdit.addressBlock.replace(/Airmen's Mess|Sgt's Mess|Mess/gi, '').replace(/^[,\s:-]+/, '').trim();
+      const raw = airmanToEdit.addressBlock.trim();
+      const lower = raw.toLowerCase();
+      if (lower.includes('mess') || lower.includes('block')) {
+        const match = raw.match(/Block\s*(?:No[:\s]*)?([^,]+)/i);
+        const extracted = match
+          ? match[1].trim()
+          : raw.replace(/Airmen's Mess|Sgt's Mess|Mess/gi, '').replace(/^[,\s:-]+/, '').trim();
+        const cleaned = extracted.replace(/^[.\-\s]+|[.\-\s]+$/g, '').trim();
+        return cleaned;
+      }
     }
     return '';
   });
@@ -174,8 +181,9 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
   const computeFinalAddress = (): string => {
     if (livingType === 'L_IN') {
       const messType = isSgtOrAbove(rank) ? "Sgt's Mess" : "Airmen's Mess";
-      if (blockNo.trim()) {
-        return `${messType}, Block No: ${blockNo.trim()}`;
+      const cleanBlock = blockNo.replace(/^[.\-\s]+|[.\-\s]+$/g, '').trim();
+      if (cleanBlock) {
+        return `${messType}, Block No: ${cleanBlock}`;
       }
       return messType;
     } else if (livingType === 'L_OUT') {
@@ -219,7 +227,6 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
     }
 
     if (!livingType) return setValidationError('Please select Living Status (L/In or L/Out)');
-    if (livingType === 'L_IN' && !blockNo.trim()) return setValidationError('Please enter Block No for Live-In address');
     if (livingType === 'L_OUT') {
       if (livingOutType === 'QUARTER' && !svcQtrNo.trim()) return setValidationError('Please enter Service Quarter Number');
       if (livingOutType === 'OUTSIDE_BASE' && !outsideAddress.trim()) return setValidationError('Please enter Outside Base Address');
@@ -267,7 +274,10 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
     }
 
     const finalAddress = computeFinalAddress();
-    const finalLeaveReason = dateLeft ? (leaveReason === 'Custom' ? customLeaveReason.trim() : leaveReason) : undefined;
+    const wasAlreadyInactive = airmanToEdit?.active === false && !airmanToEdit?.dateLeft;
+    const finalLeaveReason = dateLeft
+      ? (leaveReason === 'Custom' ? customLeaveReason.trim() : leaveReason)
+      : (wasAlreadyInactive ? (airmanToEdit?.leaveReason || 'Posted Out') : undefined);
 
     onSave({
       fullName: fullName.trim(),
@@ -286,7 +296,7 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
       dateJoined: dateJoined || '',
       dateLeft: dateLeft || '',
       leaveReason: finalLeaveReason || '',
-      active: !dateLeft, // Set active to false if dateLeft is provided
+      active: dateLeft ? false : (wasAlreadyInactive ? false : true),
       // Custom seniority order for all ranks in Biodata Register
       seniority: seniority !== '' && targetResolved
         ? targetResolved.resolvedSeniority
@@ -689,7 +699,12 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => setLivingType('L_IN')}
+                onClick={() => {
+                  setLivingType('L_IN');
+                  if (/qtr|quarter/i.test(blockNo) || /^[.\-\s]+$/.test(blockNo)) {
+                    setBlockNo('');
+                  }
+                }}
                 className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center space-x-1.5 transition-all cursor-pointer ${
                   livingType === 'L_IN'
                     ? 'bg-emerald-600 text-white shadow-xs border-transparent'
@@ -719,19 +734,21 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
               <div className="pt-2 border-t border-slate-200 dark:border-slate-700 space-y-2">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    {isSgtOrAbove(rank) ? "Sgt's Mess" : "Airmen's Mess"} <span className="text-red-500">*</span>
+                    {isSgtOrAbove(rank) ? "Sgt's Mess" : "Airmen's Mess"}{' '}
+                    <span className="text-[10px] font-normal text-slate-400">
+                      (Leave blank for "{isSgtOrAbove(rank) ? "Sgt's Mess" : "Airmen's Mess"}" only)
+                    </span>
                   </label>
                   <div className="flex items-center w-full px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-xl focus-within:ring-2 focus-within:ring-emerald-500">
                     <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 mr-2 whitespace-nowrap">Block No:</span>
                     <input
                       type="text"
-                      required
                       value={blockNo}
                       onChange={(e) => {
                         setBlockNo(e.target.value);
                         if (validationError) setValidationError('');
                       }}
-                      placeholder=""
+                      placeholder={isSgtOrAbove(rank) ? "Optional (Blank = Sgt's Mess)" : "Optional"}
                       className="flex-1 bg-transparent text-xs font-semibold text-slate-900 dark:text-white focus:outline-hidden"
                     />
                   </div>

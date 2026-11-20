@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Airman, DetailedUserLogin, Rank, FlightName, UserRole } from '../types';
 import { Logo155UASU } from './Logo155UASU';
 import { AppOwnerMasterPortal } from './AppOwnerMasterPortal';
+import { PWAInstallButton } from './PWAInstallButton';
+import { syncDynamicOfficePwaManifest } from '../utils/dynamicPwaManifest';
 import {
   X,
   Shield,
@@ -81,6 +83,10 @@ import {
   setLastUsedPortal,
   PortalType,
   saveLastUsedIdForPortal,
+  getLastUsedIdForPortal,
+  getRecentLoginsForPortal,
+  recordPortalLoginSuccess,
+  removeRecentLoginForPortal,
 } from '../services/portalPreferenceService';
 
 interface UserLoginGateProps {
@@ -206,8 +212,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     }
   };
 
-  // Start with empty User ID so "Office Management" is shown by default when no User ID is entered
-  const [bdInput, setBdInput] = useState<string>('');
+  // Auto-fill with the latest logged-in User ID stored in Local Cloud
+  const [bdInput, setBdInput] = useState<string>(() => getLastUsedIdForPortal('Office'));
   const [passwordInput, setPasswordInput] = useState('');
   const [showPin, setShowPin] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>('');
@@ -342,7 +348,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   }, []);
 
   const displayedOfficeSubtitle = useMemo(() => {
-    if (!cleanTypedBd) return 'Centralized Multi-Office Management System';
+    if (!cleanTypedBd) return '';
     if (isMasterUserTyped && selectedMasterOffice) {
       const isSel155 =
         String(selectedMasterOffice.officeCode || '').toUpperCase().trim() === '155-UASU' ||
@@ -350,9 +356,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       const rawSlogan = String(selectedMasterOffice.officeSlogan || '').trim();
       const cleanSlogan =
         !isSel155 && rawSlogan === 'Intel • Surveillance • Strike' ? '' : rawSlogan;
-      return cleanSlogan
-        ? `${selectedMasterOffice.officeBase || 'BAF BASE ZHR'} • ${cleanSlogan}`
-        : selectedMasterOffice.officeBase || 'BAF BASE ZHR';
+      return cleanSlogan || selectedMasterOffice.officeBase || 'BAF BASE ZHR';
     }
     if (matchedUserOffice) {
       const rawSlogan = String(matchedUserOffice.officeSlogan || '').trim();
@@ -361,22 +365,53 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         : rawSlogan === 'Intel • Surveillance • Strike'
           ? ''
           : rawSlogan;
-      return cleanSlogan
-        ? `${matchedUserOffice.officeBase || 'BAF BASE ZHR'} • ${cleanSlogan}`
-        : matchedUserOffice.officeBase || 'BAF BASE ZHR';
+      return cleanSlogan || matchedUserOffice.officeBase || 'BAF BASE ZHR';
     }
     if (matchedPendingRequest) {
-      return `${matchedPendingRequest.officeBase || 'BAF BASE ZHR'} • Pending Master Admin Approval`;
+      const pendingSlogan = String(matchedPendingRequest.officeSlogan || '').trim();
+      return pendingSlogan || matchedPendingRequest.officeBase || 'BAF BASE ZHR';
     }
-    return 'Enter your registered BD No to detect your Office';
+    return '';
   }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
 
-  const [officeRecentLogins, setOfficeRecentLogins] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('baf_recent_logins');
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
+  // Keep PWA Manifest & Icons synced with the currently matched/displayed office on the Login Portal
+  useEffect(() => {
+    const matchedCode = isMasterUserTyped
+      ? selectedMasterOffice?.officeCode
+      : matchedUserOffice?.officeCode || matchedPendingRequest?.officeCode;
+    syncDynamicOfficePwaManifest({
+      officeName: displayedOfficeName,
+      officeLogo: displayedOfficeLogo,
+      officeCode: matchedCode,
+      officeSlogan: displayedOfficeSubtitle,
+    });
+  }, [
+    displayedOfficeName,
+    displayedOfficeLogo,
+    displayedOfficeSubtitle,
+    isMasterUserTyped,
+    selectedMasterOffice,
+    matchedUserOffice,
+    matchedPendingRequest,
+  ]);
+
+  const [officeRecentLogins, setOfficeRecentLogins] = useState<string[]>(() =>
+    getRecentLoginsForPortal()
+  );
+
+  useEffect(() => {
+    const syncLocalCloudLoginPrefs = () => {
+      const latestRecents = getRecentLoginsForPortal();
+      setOfficeRecentLogins(latestRecents);
+      setBdInput((prev) => prev || getLastUsedIdForPortal('Office'));
+    };
+    window.addEventListener('baf_settings_synced', syncLocalCloudLoginPrefs);
+    window.addEventListener('storage', syncLocalCloudLoginPrefs);
+    return () => {
+      window.removeEventListener('baf_settings_synced', syncLocalCloudLoginPrefs);
+      window.removeEventListener('storage', syncLocalCloudLoginPrefs);
+    };
+  }, []);
 
   // In-App Software Update Check right on Login Screen
   const [updateAvailable, setUpdateAvailable] = useState<AppVersionRecord | null>(null);
@@ -411,9 +446,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const recentLogins = officeRecentLogins;
 
   const removeRecent = (id: string) => {
-    const updated = officeRecentLogins.filter((x) => x !== id);
+    const updated = removeRecentLoginForPortal(id);
     setOfficeRecentLogins(updated);
-    localStorage.setItem('baf_recent_logins', JSON.stringify(updated));
   };
 
   // Reset Password Flow States
@@ -647,6 +681,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       await provisionMasterOwnerInOffice(targetAirmen);
       loginAsMasterOwnerSession();
       syncBrowserTabIdentity(activeId.officeName, activeId.officeLogo, activeId.officeBase);
+      const updatedMasterRecents = recordPortalLoginSuccess(cleanInput);
+      setOfficeRecentLogins(updatedMasterRecents);
       setLastUsedPortal(activeTab);
 
       setSuccessAirman({
@@ -737,14 +773,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         finalIdentity.officeBase
       );
 
-      // Do not store Master ID in recent logins list so it stays invisible to regular office users
-      if (!isMasterLoginAttempt) {
-        const updatedRecents = [cleanInput, ...officeRecentLogins.filter((x) => x !== cleanInput)].slice(0, 4);
-        setOfficeRecentLogins(updatedRecents);
-        localStorage.setItem('baf_recent_logins', JSON.stringify(updatedRecents));
-        localStorage.setItem('baf_last_used_id', cleanInput);
-        saveLastUsedIdForPortal(activeTab, cleanInput);
-      }
+      const updatedRecents = recordPortalLoginSuccess(cleanInput);
+      setOfficeRecentLogins(updatedRecents);
       setLastUsedPortal(activeTab);
 
       setIsLoading(false);
@@ -832,6 +862,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
       }
 
       saveDetailedUsers(users);
+      const updatedResetRecents = recordPortalLoginSuccess(cleanBd);
+      setOfficeRecentLogins(updatedResetRecents);
 
       setSuccessAirman(targetAirman);
       setUserSession(targetAirman, userDetail.role, userDetail);
@@ -1042,37 +1074,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
             : 'max-w-[340px] sm:max-w-[360px]'
         } relative z-10 transition-all duration-200`}
       >
-        <div className="flex items-center justify-center mb-3">
-          <div
-            className="inline-flex items-center gap-1 p-1 rounded-xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200 dark:border-slate-800 shadow-sm"
-            role="group"
-            aria-label="Global Theme Selector"
-          >
-            {([
-              { id: 'light', label: 'Light', icon: Sun },
-              { id: 'dark', label: 'Dark', icon: Moon },
-              { id: 'system', label: 'Auto', icon: Monitor },
-            ] as const).map((opt) => {
-              const Icon = opt.icon;
-              const isSelected = themePreference === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => setThemePreference(opt.id)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
-                    isSelected
-                      ? 'bg-emerald-600 text-white shadow-sm'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <Icon className="w-3.5 h-3.5" />
-                  <span>{opt.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        {/* Theme selector moved inside Settings Modal */}
 
         <div className="bg-white/95 dark:bg-[#0d1526]/95 backdrop-blur-xl border border-slate-200 dark:border-slate-800/90 rounded-2xl p-5 sm:p-7 shadow-2xl space-y-4 sm:space-y-5 text-slate-900 dark:text-white text-center">
           {/* Header */}
@@ -1107,26 +1109,18 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                     : displayedOfficeName}
                 </span>
               </h1>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-0.5">
-                {isRegisterMode
-                  ? registerStep === 1
-                    ? 'Step 1: Office Information (Office Name, Base, Slogan & Logo)'
-                    : registerStep === 2
-                    ? 'Step 2: User Information (User ID, Full Name, Surname, Trade, User Role, Contact No)'
-                    : registerStep === 3
-                    ? 'Step 3: Review & Submit for Master Admin Approval'
-                    : 'Registration Request Submitted for Approval'
-                  : displayedOfficeSubtitle}
-              </p>
-
-              {/* Matched User Office Badge */}
-              {!isRegisterMode && !isResetMode && matchedUserOffice && (
-                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-[11px] font-bold mt-2">
-                  <Building2 className="w-3.5 h-3.5 shrink-0" />
-                  <span>
-                    {matchedUserOffice.officeName} • {matchedUserOffice.userName}
-                  </span>
-                </div>
+              {(isRegisterMode || displayedOfficeSubtitle) && (
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-0.5">
+                  {isRegisterMode
+                    ? registerStep === 1
+                      ? 'Step 1: Office Information (Office Name, Base, Slogan & Logo)'
+                      : registerStep === 2
+                      ? 'Step 2: User Information (User ID, Full Name, Surname, Trade, User Role, Contact No)'
+                      : registerStep === 3
+                      ? 'Step 3: Review & Submit for Master Admin Approval'
+                      : 'Registration Request Submitted for Approval'
+                    : displayedOfficeSubtitle}
+                </p>
               )}
 
               {/* Pending Approval Notice if User types BD No of an unapproved Office Request */}
@@ -1987,9 +1981,6 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                             setBdInput(val);
                             setErrorMsg('');
                             if (targetAirman) setTargetAirman(null);
-                            if (val && val !== MASTER_OWNER_USER_ID) {
-                              saveLastUsedIdForPortal('Office', val);
-                            }
                           }}
                           onKeyDown={(e) => {
                             if (
@@ -2008,9 +1999,6 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                             if (pasted) {
                               setBdInput(pasted);
                               setErrorMsg('');
-                              if (pasted !== MASTER_OWNER_USER_ID) {
-                                saveLastUsedIdForPortal('Office', pasted);
-                              }
                             }
                           }}
                           onFocus={() => {
@@ -2021,7 +2009,6 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                             setTimeout(() => setIsUserIdFocused(false), 200);
                             const cleanInput = bdInput.replace(/^BD\/?/i, '').replace(/[^0-9]/g, '').trim();
                             if (cleanInput && cleanInput !== MASTER_OWNER_USER_ID) {
-                              saveLastUsedIdForPortal('Office', cleanInput);
                               const found = airmen.find(
                                 (a) => (a.bdNo || '').replace(/^BD\/?/i, '').replace(/[^0-9]/g, '').trim().toLowerCase() === cleanInput.toLowerCase()
                               );
@@ -2049,7 +2036,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                         </label>
                       </div>
 
-                      {recentLogins.length > 0 && isUserIdFocused && !isMasterUserTyped && (
+                      {recentLogins.length > 0 && isUserIdFocused && (
                         <div className="mt-2 p-2 bg-slate-100 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700">
                           <div className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2 px-1">Recent Accounts</div>
                           {recentLogins.map((id) => (
@@ -2058,11 +2045,12 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                                 type="button"
                                 onMouseDown={(e) => e.preventDefault()}
                                 onClick={() => {
-                                  setBdInput(id.replace(/[^0-9]/g, ''));
+                                  const cleanSelected = id.replace(/[^0-9]/g, '');
+                                  setBdInput(cleanSelected);
                                   setIsUserIdFocused(false);
                                   setIsPasswordFocused(true);
-                                  saveLastUsedIdForPortal('Office', id);
-                                  const found = airmen.find((a) => a.bdNo === id);
+                                  saveLastUsedIdForPortal('Office', cleanSelected);
+                                  const found = airmen.find((a) => a.bdNo === cleanSelected);
                                   setTargetAirman(found || null);
                                 }}
                                 className="flex-1 text-left font-mono text-xs text-slate-700 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-white flex items-center space-x-2"
@@ -2272,6 +2260,12 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                 <UserPlus className="w-4 h-4" />
                 <span>Register a New Office</span>
               </button>
+
+              <PWAInstallButton
+                variant="login"
+                officeName={displayedOfficeName}
+                officeLogo={displayedOfficeLogo}
+              />
 
               <div className="flex flex-col items-center space-y-2.5 mt-3">
                 <button

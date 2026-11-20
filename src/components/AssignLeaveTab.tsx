@@ -58,8 +58,19 @@ export const AssignLeaveTab: React.FC<AssignLeaveTabProps> = ({
   }, [isAdmin, adminFlight]);
 
   const grantAirmenList = useMemo(() => {
-    return sortAirmenBySeniority(airmen.filter((a) => a.flightName === grantLeaveFlight));
-  }, [airmen, grantLeaveFlight]);
+    return sortAirmenBySeniority(
+      airmen.filter(
+        (a) =>
+          a.flightName === grantLeaveFlight &&
+          a.active !== false &&
+          !['posted out', 'retired', 'dismissed', 'inactive'].includes(
+            String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
+          ) &&
+          (!a.dateLeft || a.dateLeft > leaveFromDate) &&
+          (!a.dateJoined || a.dateJoined <= leaveFromDate)
+      )
+    );
+  }, [airmen, grantLeaveFlight, leaveFromDate]);
 
   const [assignmentsMap, setAssignmentsMap] = useState<Record<string, DutyAssignment[]>>(() => {
     return localDb.getDb()?.assignments || {};

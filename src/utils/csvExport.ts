@@ -5,7 +5,7 @@ import { Airman, DutyAssignment } from '../types';
 import { formatRank } from './rankFormatter';
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { resolveAirmanDutyForDate, addAssignmentToMap, calculateDutyStats } from '../data/rosterGenerator';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
 
 export function normalizeDateToISO(val: any): string {
   if (!val) return '';

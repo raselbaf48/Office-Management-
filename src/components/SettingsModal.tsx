@@ -38,8 +38,15 @@ import {
   Check,
   Link2,
   Building2,
+  Sun,
+  Moon,
+  Monitor,
+  Palette,
 } from 'lucide-react';
 import { Logo155UASU } from './Logo155UASU';
+import { PWAInstallButton } from './PWAInstallButton';
+import { syncDynamicOfficePwaManifest } from '../utils/dynamicPwaManifest';
+import { useGlobalTheme, THEME_STORAGE_KEY } from '../utils/themeManager';
 import { UserManagementTab } from './UserManagementTab';
 import { GoogleDriveBackupModal } from './GoogleDriveBackupModal';
 import { UserRole, DetailedUserLogin, UserLoginStatus, UserLoginRole, Rank, FlightName } from '../types';
@@ -83,6 +90,7 @@ interface SettingsModalProps {
 
 type SettingSection =
   | 'officeProfile'
+  | 'appTheme'
   | 'appUpdate'
   | 'cloudsync'
   | 'users'
@@ -134,6 +142,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onOpenAdminLogin,
   onRosterUpdated,
 }) => {
+  const { themePreference, setThemePreference } = useGlobalTheme();
   const [activeSection, setActiveSection] = useState<SettingSection | null>(null);
   const [appManagementTab, setAppManagementTab] = useState<'notice' | 'maintenance'>('notice');
   const [mobileView, setMobileView] = useState<'list' | 'detail'>('list');
@@ -219,6 +228,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setProfileSlogan(saved.officeSlogan);
     setProfileBase(saved.officeBase);
     localDb.syncSettingToCloud(OFFICE_PROFILE_STORAGE_KEY, JSON.stringify(saved));
+    syncDynamicOfficePwaManifest({
+      officeName: saved.officeName,
+      officeLogo: saved.officeLogo,
+      officeSlogan: saved.officeSlogan,
+      officeBase: saved.officeBase,
+    });
     setProfileSavedMsg('Office Profile updated across all views, headers, reports & exports!');
     if (onRosterUpdated) {
       onRosterUpdated();
@@ -954,6 +969,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const sections = [
     { id: 'officeProfile', label: 'Office Profile', icon: <Building2 className="w-5 h-5" />, color: 'text-emerald-500 bg-emerald-100 dark:bg-emerald-950 dark:text-emerald-400' },
+    { id: 'appTheme', label: 'App Theme', icon: <Palette className="w-5 h-5" />, color: 'text-indigo-500 bg-indigo-100 dark:bg-indigo-950 dark:text-indigo-400' },
     ...(isRunningInApk() ? [{ id: 'appUpdate', label: 'In-App Update (APK)', icon: <Download className="w-5 h-5" />, color: 'text-emerald-500 bg-emerald-100 dark:bg-emerald-950 dark:text-emerald-400' }] : []),
     ...(isAdminRole ? [{ id: 'cloudsync', label: 'Database Cloud Sync & Invite', icon: <Cloud className="w-5 h-5" />, color: 'text-blue-500 bg-blue-100 dark:bg-blue-950 dark:text-blue-400' }] : []),
     ...(isAdminRole ? [
@@ -1084,9 +1100,105 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {activeSection !== 'users' ? (
               <div className="flex-1 overflow-y-auto p-6 sm:p-8">
                 <div className="max-w-3xl mx-auto space-y-8">
+                  {/* App Theme Section */}
+                  {displayedSection === 'appTheme' && (
+                    <div className="space-y-6 animate-fadeIn">
+                      <div className="bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/80 rounded-2xl p-6 space-y-5">
+                        <div className="flex items-center gap-3">
+                          <div className="w-11 h-11 rounded-xl bg-indigo-100 dark:bg-indigo-950/80 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                            <Palette className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <h4 className="text-base font-bold text-slate-900 dark:text-white">
+                              Appearance & Theme Mode
+                            </h4>
+                            <p className="text-xs text-slate-500 dark:text-slate-400">
+                              Default is System theme. Any manual change is automatically saved to your Local Cloud.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 pt-2">
+                          {(
+                            [
+                              {
+                                id: 'system',
+                                label: 'System (Default)',
+                                subtitle: 'Matches device light/dark mode automatically',
+                                icon: Monitor,
+                              },
+                              {
+                                id: 'dark',
+                                label: 'Dark Mode',
+                                subtitle: 'Deep slate appearance for low-light environments',
+                                icon: Moon,
+                              },
+                              {
+                                id: 'light',
+                                label: 'Light Mode',
+                                subtitle: 'Crisp high-contrast daylight appearance',
+                                icon: Sun,
+                              },
+                            ] as const
+                          ).map((opt) => {
+                            const Icon = opt.icon;
+                            const isSelected = themePreference === opt.id;
+                            return (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() => {
+                                  setThemePreference(opt.id);
+                                  try {
+                                    localDb.syncSettingToCloud(THEME_STORAGE_KEY, opt.id);
+                                  } catch {}
+                                }}
+                                className={`flex flex-col items-start gap-3 p-4 rounded-2xl border-2 text-left transition-all cursor-pointer ${
+                                  isSelected
+                                    ? 'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/30 shadow-md shadow-emerald-500/10'
+                                    : 'border-slate-200 dark:border-slate-700/70 bg-white dark:bg-slate-900/60 hover:border-slate-300 dark:hover:border-slate-600'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between w-full">
+                                  <div
+                                    className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                                      isSelected
+                                        ? 'bg-emerald-600 text-white shadow-sm'
+                                        : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                                    }`}
+                                  >
+                                    <Icon className="w-5 h-5" />
+                                  </div>
+                                  {isSelected && (
+                                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
+                                      <Check className="w-3 h-3" /> Active
+                                    </span>
+                                  )}
+                                </div>
+                                <div>
+                                  <div className="text-sm font-bold text-slate-900 dark:text-white">
+                                    {opt.label}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
+                                    {opt.subtitle}
+                                  </div>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Office Profile Section */}
                   {displayedSection === 'officeProfile' && (
                     <form onSubmit={handleSaveOfficeProfile} className="space-y-6 animate-fadeIn">
+                      <PWAInstallButton
+                        variant="settings"
+                        officeName={profileUnitName}
+                        officeLogo={profileLogo}
+                      />
                       {/* Live Identity Preview Card */}
                       <div className="bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950 border border-slate-700/80 rounded-2xl p-6 text-white shadow-xl">
                         <div className="flex flex-col sm:flex-row items-center gap-5">

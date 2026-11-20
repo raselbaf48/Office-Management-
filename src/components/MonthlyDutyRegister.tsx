@@ -256,7 +256,15 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
     if (cellEditModal.assignedAirman && !cellEditProxyFlight && cellEditModal.assignedAirman.flightName === targetFlight) {
       setSelectedReplacementAirmanId(cellEditModal.assignedAirman.id);
     } else {
-      const flAirmen = airmen.filter((a) => a.flightName === targetFlight);
+      const flAirmen = airmen.filter(
+        (a) =>
+          a.flightName === targetFlight &&
+          a.active !== false &&
+          !['posted out', 'retired', 'dismissed', 'inactive'].includes(
+            String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
+          ) &&
+          (!a.dateLeft || a.dateLeft > cellEditModal.date)
+      );
       if (flAirmen.length > 0) {
         setSelectedReplacementAirmanId(flAirmen[0].id);
       } else {
@@ -356,6 +364,10 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
   // Filter eligible airmen based on selected Flight and Duty eligibility
   const getEligibleAirmen = () => {
     return airmen.filter((a) => {
+      if (a.active === false) return false;
+      const reasonLower = String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim();
+      if (['posted out', 'retired', 'dismissed', 'inactive'].includes(reasonLower)) return false;
+      if (a.dateLeft && (!bulkFromDate || a.dateLeft <= bulkFromDate)) return false;
       // 1. Flight match
       if (bulkFlight !== 'All' && a.flightName !== bulkFlight) {
         return false;

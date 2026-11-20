@@ -1759,9 +1759,13 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         if (isAdmin && adminFlight && airman.flightName !== adminFlight) {
           return false;
         }
+        // Exclude inactive / Posted Out / Retired / Dismissed airmen
+        if (airman.active === false) return false;
+        const leaveReasonLower = String((airman as any).leaveReason || (airman as any).status || '').toLowerCase().trim();
+        if (['posted out', 'retired', 'dismissed', 'inactive'].includes(leaveReasonLower)) return false;
         // Active Date Filtering (ensure they exist in the unit on fromDate)
         if (airman.dateJoined && airman.dateJoined > fromDate) return false;
-        if (airman.dateLeft && airman.dateLeft < fromDate) return false;
+        if (airman.dateLeft && airman.dateLeft <= fromDate) return false;
 
         if (targetFlight !== 'All' && airman.flightName !== targetFlight) return false;
 

@@ -622,8 +622,8 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
   // Override manpower with calculated effManpower so that totalSgt etc uses it!
   const currentManpower = effManpower;
   
-  const totalSgt = Object.values(tradeManpowerMap).reduce((sum, item) => sum + item.sgt, 0);
-  const totalCpl = Object.values(tradeManpowerMap).reduce((sum, item) => sum + item.cpl, 0);
+  const totalSgt = (Object.values(tradeManpowerMap) as { sgt: number; cpl: number }[]).reduce((sum, item) => sum + item.sgt, 0);
+  const totalCpl = (Object.values(tradeManpowerMap) as { sgt: number; cpl: number }[]).reduce((sum, item) => sum + item.cpl, 0);
   const totalSgtAndBelow = totalSgt + totalCpl;
 
   useEffect(() => {

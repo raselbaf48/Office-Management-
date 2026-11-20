@@ -393,6 +393,8 @@ function enrichAirmanWithInitialBaseline(a: any, isDefault155: boolean): any {
     return (iDigits && iDigits === digits) || i.id === a.id || i.bdNo === a.bdNo;
   });
   if (!initA) return a;
+  const rawAddr = String(a.addressBlock || initA.addressBlock || '').trim();
+  const normalizedAddr = rawAddr.replace(/^(Sgt's Mess|Airmen's Mess),\s*Block No:\s*[.\-\s]*$/i, '$1');
   return {
     ...initA,
     ...a,
@@ -400,7 +402,7 @@ function enrichAirmanWithInitialBaseline(a: any, isDefault155: boolean): any {
     bdNo: a.bdNo || initA.bdNo,
     serNo: a.serNo || initA.serNo,
     code: a.code || initA.code,
-    addressBlock: a.addressBlock || initA.addressBlock,
+    addressBlock: normalizedAddr,
     mobileNo: a.mobileNo || initA.mobileNo,
     permanentAddress: a.permanentAddress || initA.permanentAddress,
     bloodGroup: a.bloodGroup || initA.bloodGroup,
@@ -2629,7 +2631,7 @@ export class LocalDatabaseEngine {
           seniority: airmenByBd.size + 1,
           code: cand.code || `${candRank}-${shortCode}`,
           bdNo: digits,
-          rank: candRank,
+          rank: candRank as Airman['rank'],
           fullName: candFullName,
           name: candSurname,
           trade: candTrade,

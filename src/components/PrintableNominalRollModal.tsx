@@ -218,10 +218,19 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
                         <div className="leading-tight whitespace-normal min-w-[90px]">
                           {airman.addressBlock ? (
                             airman.addressBlock.includes("Mess, Block No:") ? (
-                              <>
-                                <span className="block">{airman.addressBlock.split(", Block No:")[0]},</span>
-                                <span className="block text-[10px] text-slate-500 font-bold">Block No:{airman.addressBlock.split(", Block No:")[1]}</span>
-                              </>
+                              (() => {
+                                const [messName, rawBlk] = airman.addressBlock.split(", Block No:");
+                                const cleanBlk = (rawBlk || '').replace(/^[.\-\s]+|[.\-\s]+$/g, '').trim();
+                                if (!cleanBlk) {
+                                  return <span className="block">{messName}</span>;
+                                }
+                                return (
+                                  <>
+                                    <span className="block">{messName},</span>
+                                    <span className="block text-[10px] text-slate-500 font-bold">Block No: {cleanBlk}</span>
+                                  </>
+                                );
+                              })()
                             ) : (
                               <span className="block">{airman.addressBlock}</span>
                             )

@@ -89,11 +89,20 @@ export const DeploymentRegisterView: React.FC<DeploymentRegisterViewProps> = ({
 
   // Filter airmen for Grant Deployment Modal
   const grantAirmenList = useMemo(() => {
+    const activeOnly = airmen.filter(
+      (a) =>
+        a.active !== false &&
+        !['posted out', 'retired', 'dismissed', 'inactive'].includes(
+          String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
+        ) &&
+        (!a.dateLeft || a.dateLeft > attFromDate) &&
+        (!a.dateJoined || a.dateJoined <= attFromDate)
+    );
     const list = hasFlights
-      ? (grantAttFlight === 'All' ? airmen : airmen.filter((a) => a.flightName === grantAttFlight))
-      : (grantAttTrade === 'All' ? airmen : airmen.filter((a) => (a.trade || '').trim() === grantAttTrade));
+      ? (grantAttFlight === 'All' ? activeOnly : activeOnly.filter((a) => a.flightName === grantAttFlight))
+      : (grantAttTrade === 'All' ? activeOnly : activeOnly.filter((a) => (a.trade || '').trim() === grantAttTrade));
     return sortAirmenBySeniority(list);
-  }, [airmen, grantAttFlight, grantAttTrade, hasFlights]);
+  }, [airmen, grantAttFlight, grantAttTrade, hasFlights, attFromDate]);
 
   // Selection is now multiple and defaults to none.
   // Allowed cross-flight selection

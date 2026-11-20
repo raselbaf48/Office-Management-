@@ -346,7 +346,7 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                             return initMatch?.fullName || fn || airman.name;
                           })()}
                         </span>
-                        {(!airman.bdNo?.trim() || !airman.rank?.trim() || !airman.name?.trim() || !airman.trade?.trim() || ['General Tech', '-', 'N/A'].includes(airman.trade) || !airman.addressBlock?.trim() || ['-', 'N/A', 'L/O', 'L/I', "Sgt's Mess", "Airmen's Mess", "Live Out", "Live In"].includes(airman.addressBlock) || !airman.mobileNo?.trim() || ['01', '01700000000', '-'].includes(airman.mobileNo)) && (
+                        {(!airman.bdNo?.trim() || !airman.rank?.trim() || !airman.name?.trim() || !airman.trade?.trim() || ['General Tech', '-', 'N/A'].includes(airman.trade) || !airman.addressBlock?.trim() || ['-', 'N/A', 'L/O', 'L/I', "Live Out", "Live In"].includes(airman.addressBlock) || !airman.mobileNo?.trim() || ['01', '01700000000', '-'].includes(airman.mobileNo)) && (
                           <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" title="Missing or incomplete information (Trade, Address, or Mobile). Click to update." />
                         )}
                       </div>
@@ -429,10 +429,19 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                       <div className="text-left leading-tight" title={airman.addressBlock}>
                         {airman.addressBlock ? (
                           airman.addressBlock.includes("Mess, Block No:") ? (
-                            <>
-                              <span className="block">{airman.addressBlock.split(", Block No:")[0]},</span>
-                              <span className="block text-[10px] text-slate-500 font-bold">Block No:{airman.addressBlock.split(", Block No:")[1]}</span>
-                            </>
+                            (() => {
+                              const [messName, rawBlk] = airman.addressBlock.split(", Block No:");
+                              const cleanBlk = (rawBlk || '').replace(/^[.\-\s]+|[.\-\s]+$/g, '').trim();
+                              if (!cleanBlk) {
+                                return <span className="block whitespace-normal min-w-[120px]">{messName}</span>;
+                              }
+                              return (
+                                <>
+                                  <span className="block">{messName},</span>
+                                  <span className="block text-[10px] text-slate-500 font-bold">Block No: {cleanBlk}</span>
+                                </>
+                              );
+                            })()
                           ) : (
                             <span className="block whitespace-normal min-w-[120px]">{airman.addressBlock}</span>
                           )

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Logo155UASU } from './Logo155UASU';
+import { PWAInstallButton } from './PWAInstallButton';
 import {
   LayoutDashboard,
   Users,
@@ -485,9 +486,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         )}
 
-        {/* Settings Button in Sidebar Bottom */}
-        {onOpenSettings && (
-          <div className={`${isCollapsed ? 'px-2 py-2.5' : 'px-3 py-2'} border-t border-[#cde7d8] dark:border-[#0d4f31] bg-[#e4f3eb]/60 dark:bg-transparent shrink-0`}>
+        {/* Settings & Install PWA Buttons in Sidebar Bottom */}
+        <div className={`${isCollapsed ? 'px-2 py-2.5 space-y-2' : 'px-3 py-2 space-y-2'} border-t border-[#cde7d8] dark:border-[#0d4f31] bg-[#e4f3eb]/60 dark:bg-transparent shrink-0`}>
+          <PWAInstallButton
+            variant="sidebar"
+            collapsed={isCollapsed}
+            officeName={officeIdentity.officeName}
+            officeLogo={officeIdentity.officeLogo}
+          />
+          {onOpenSettings && (
             <button
               type="button"
               onClick={() => {
@@ -502,8 +509,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <Settings className="w-4 h-4 text-slate-600 dark:text-emerald-300 shrink-0" />
               {!isCollapsed && <span>Settings</span>}
             </button>
-          </div>
-        )}
+          )}
+        </div>
 
         {/* Footer Role & Unit Info (Shown cleanly when expanded) */}
         {!isCollapsed && (

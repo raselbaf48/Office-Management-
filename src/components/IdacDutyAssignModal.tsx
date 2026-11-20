@@ -48,8 +48,18 @@ export const IdacDutyAssignModal: React.FC<IdacDutyAssignModalProps> = ({
     }
   }, [shift, availableFlights, selectedFlight]);
 
-  // Filter airmen by flight
-  const flightAirmen = sortAirmenBySeniority(airmen.filter((a) => a.flightName === selectedFlight));
+  // Filter airmen by flight (only active personnel)
+  const flightAirmen = sortAirmenBySeniority(
+    airmen.filter(
+      (a) =>
+        a.flightName === selectedFlight &&
+        a.active !== false &&
+        !['posted out', 'retired', 'dismissed', 'inactive'].includes(
+          String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
+        ) &&
+        (!a.dateLeft || a.dateLeft > date)
+    )
+  );
 
   // Default airman selection
   React.useEffect(() => {
@@ -150,7 +160,15 @@ export const IdacDutyAssignModal: React.FC<IdacDutyAssignModalProps> = ({
           flightList.forEach((flt) => {
             const quota = getFlightDutyQuotaForDate(dateStr, flt, 'IDAC', sh);
             if (quota > 0) {
-              const eligibleAirmen = airmen.filter((a) => a.flightName === flt);
+              const eligibleAirmen = airmen.filter(
+                (a) =>
+                  a.flightName === flt &&
+                  a.active !== false &&
+                  !['posted out', 'retired', 'dismissed', 'inactive'].includes(
+                    String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
+                  ) &&
+                  (!a.dateLeft || a.dateLeft > dateStr)
+              );
               if (eligibleAirmen.length > 0) {
                 for (let q = 0; q < quota; q++) {
                   const ptr = flightPointer[flt] % eligibleAirmen.length;

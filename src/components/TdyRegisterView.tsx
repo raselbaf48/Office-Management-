@@ -83,11 +83,20 @@ export const TdyRegisterView: React.FC<TdyRegisterViewProps> = ({
 
   // Filter airmen for Grant TDY Modal
   const grantAirmenList = useMemo(() => {
+    const activeOnly = airmen.filter(
+      (a) =>
+        a.active !== false &&
+        !['posted out', 'retired', 'dismissed', 'inactive'].includes(
+          String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
+        ) &&
+        (!a.dateLeft || a.dateLeft > tdyFromDate) &&
+        (!a.dateJoined || a.dateJoined <= tdyFromDate)
+    );
     const list = hasFlights
-      ? airmen.filter((a) => a.flightName === grantTdyFlight)
-      : (grantTdyTrade === 'All' ? airmen : airmen.filter((a) => (a.trade || '').trim() === grantTdyTrade));
+      ? activeOnly.filter((a) => a.flightName === grantTdyFlight)
+      : (grantTdyTrade === 'All' ? activeOnly : activeOnly.filter((a) => (a.trade || '').trim() === grantTdyTrade));
     return sortAirmenBySeniority(list);
-  }, [airmen, grantTdyFlight, grantTdyTrade, hasFlights]);
+  }, [airmen, grantTdyFlight, grantTdyTrade, hasFlights, tdyFromDate]);
 
   // Selection is now multiple and defaults to none.
   useEffect(() => {

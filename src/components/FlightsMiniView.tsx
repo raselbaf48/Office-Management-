@@ -77,7 +77,7 @@ export const FlightsMiniView: React.FC<FlightsMiniViewProps> = ({
 
         <div className="flex items-center space-x-2">
           <div className="px-3.5 py-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 text-xs font-black">
-            Total Unit Strength: {airmen.length} Airmen
+            Total Unit Strength: {airmen.filter((a) => a.active !== false && !a.dateLeft).length} Airmen
           </div>
         </div>
       </div>
@@ -85,7 +85,9 @@ export const FlightsMiniView: React.FC<FlightsMiniViewProps> = ({
       {/* 4 Flights Mini Cards Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {flights.map((fl) => {
-          const flAirmen = sortAirmenBySeniority(airmen.filter((a) => a.flightName === fl));
+          const flAirmen = sortAirmenBySeniority(
+            airmen.filter((a) => a.flightName === fl && a.active !== false && !a.dateLeft)
+          );
           const meta = flightMeta[fl];
 
           const swoCount = flAirmen.filter((a) => a.rank === 'SWO' || a.rank === 'WO').length;
